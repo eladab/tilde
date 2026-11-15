@@ -1,0 +1,5 @@
+build/
+app/.build/
+tui/target/
+spike/
+.DS_Store
