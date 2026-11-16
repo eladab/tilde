@@ -84,11 +84,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private var quitting = false
     private var responderObservation: NSKeyValueObservation?
     private let passwordFill = PasswordFill()
+    /// Addresses other apps asked us to open before the TUI could take them.
+    private var urlsToOpen: [URL] = []
+    /// The TUI has asked for the tabs, so it can be told to open more.
+    private var tuiReady = false
 
     private let supportDir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/tilde")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }()
+
+    /// The list of downloads lives beside the session; the files go to ~/Downloads.
+    private lazy var downloads: DownloadStore = {
+        let env = ProcessInfo.processInfo.environment
+        var dataDir = supportDir
+        if let session = env["TILDE_SESSION"], !session.isEmpty {
+            dataDir = URL(fileURLWithPath: session).deletingLastPathComponent()
+        }
+        var target = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        if let override = env["TILDE_DOWNLOADS"], !override.isEmpty {
+            target = URL(fileURLWithPath: override)
+        }
+        return DownloadStore(file: dataDir.appendingPathComponent("downloads.json"), directory: target)
     }()
 
     private var socketPath: String { supportDir.appendingPathComponent("tilde-\(getpid()).sock").path }
@@ -98,6 +117,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.write("launch version \(Self.version)")
         store.delegate = self
+        store.onDownload = { [weak self] download in self?.downloads.adopt(download) }
+        downloads.onUpdate = { [weak self] record in self?.emit("download.updated", record.wire) }
+        downloads.onListChange = { [weak self] in
+            guard let self else { return }
+            self.emit("downloads.changed", ["downloads": self.downloads.records.map(\.wire)])
+        }
         NSApp.mainMenu = MainMenu.build(target: self)
 
         host = SwiftTermHost(font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular))
@@ -247,6 +272,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
 
     private func tuiExited(_ code: Int32?) {
         Log.write("tilde-tui exited: \(code.map(String.init) ?? "signal")")
+        tuiReady = false
         if quitting { return }
         if code == 0 {
             quitting = true
@@ -292,6 +318,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         quitRequested(sender)
         return false
+    }
+
+    // MARK: Opening addresses for other apps (links clicked elsewhere, the default browser)
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        openExternally(urls)
+    }
+
+    /// Each address becomes a new tab of the space that is showing. Which
+    /// space that is, is the TUI's to know, so it is asked to open them.
+    private func openExternally(_ urls: [URL]) {
+        urlsToOpen += urls.filter { ["http", "https", "file"].contains($0.scheme?.lowercased() ?? "") }
+        // At launch this can come before there is a window; the addresses wait.
+        if window != nil, ProcessInfo.processInfo.environment["TILDE_BACKGROUND"] == nil {
+            window.makeKeyAndOrderFront(nil)
+        }
+        flushURLsToOpen()
+    }
+
+    private func flushURLsToOpen() {
+        guard tuiReady, tui != nil, host.isProcessRunning else { return }
+        for url in urlsToOpen {
+            Log.write("opening for another app: \(url.absoluteString.prefix(200))")
+            emit("open-url", ["url": url.absoluteString])
+        }
+        urlsToOpen = []
+    }
+
+    /// Asks macOS to send web links to Tilde. macOS confirms with the user.
+    @objc func makeDefaultBrowser(_ sender: Any?) {
+        let app = Bundle.main.bundleURL
+        NSWorkspace.shared.setDefaultApplication(at: app, toOpenURLsWithScheme: "http") { error in
+            if let error { Log.write("default browser (http): \(error.localizedDescription)") }
+            NSWorkspace.shared.setDefaultApplication(at: app, toOpenURLsWithScheme: "https") { error in
+                if let error { Log.write("default browser (https): \(error.localizedDescription)") }
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -390,6 +453,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         emit("command", fields)
     }
 
+    /// Copy in the page is WebKit's. In the terminal the only text a user can
+    /// select is a field the TUI draws, so the TUI is asked for it and answers
+    /// with `clipboard.set`.
+    @objc func copyRequested(_ sender: Any?) {
+        if window.firstResponder === host.view {
+            emit("command", ["name": "copy"])
+        } else {
+            NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
+        }
+    }
+
     @objc func fillFromPasswords(_ sender: Any?) {
         guard currentMode() == .page, let web = activeWebView, !passwordFill.isActive else {
             return NSSound.beep()
@@ -399,6 +473,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             if outcome.hasPrefix("failed") { NSSound.beep() }
             self?.syncMode()
         }
+    }
+
+    // MARK: Page zoom
+
+    /// The steps Cmd+Plus and Cmd+Minus move through, as in Safari.
+    private static let zoomSteps: [CGFloat] = [0.5, 0.67, 0.75, 0.85, 1, 1.15, 1.25, 1.5, 1.75, 2, 2.5, 3]
+
+    /// Zoom is per tab and lasts as long as the tab's web view.
+    private func stepZoom(_ direction: Int) {
+        guard let web = activeWebView else { return NSSound.beep() }
+        let current = web.pageZoom
+        let next = direction > 0
+            ? Self.zoomSteps.first { $0 > current + 0.001 }
+            : Self.zoomSteps.last { $0 < current - 0.001 }
+        guard let next else { return NSSound.beep() }
+        web.pageZoom = next
+    }
+
+    @objc func zoomIn(_ sender: Any?) { stepZoom(1) }
+
+    @objc func zoomOut(_ sender: Any?) { stepZoom(-1) }
+
+    /// Undoes both Cmd+Plus/Minus zoom and a trackpad pinch.
+    @objc func zoomReset(_ sender: Any?) {
+        guard let web = activeWebView else { return NSSound.beep() }
+        web.pageZoom = 1
+        web.magnification = 1
     }
 
     private func emit(_ event: String, _ fields: [String: Any] = [:]) {
@@ -479,6 +580,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             return Wire.reply(id: id)
 
         case "tab.list":
+            // Once it has the tabs the TUI can take addresses to open; they
+            // must reach it after this reply.
+            tuiReady = true
+            DispatchQueue.main.async { [weak self] in self?.flushURLsToOpen() }
             var fields: [String: Any] = ["tabs": store.orderedTabs.map { $0.state }]
             if let activeID { fields["active"] = activeID }
             return Wire.reply(id: id, fields)
@@ -546,6 +651,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             applyResponder()
             return Wire.reply(id: id, ["mode": currentMode().rawValue])
 
+        case "download.list":
+            return Wire.reply(id: id, ["downloads": downloads.records.map(\.wire)])
+
+        case "download.open", "download.reveal", "download.cancel", "download.remove":
+            guard let download = req.int("download_id") else { return Wire.failure(id: id, "missing download_id") }
+            var problem: String?
+            switch req.method {
+            case "download.open": problem = downloads.open(download)
+            case "download.reveal": problem = downloads.reveal(download)
+            case "download.cancel": downloads.cancel(download)
+            default: downloads.remove(download)
+            }
+            return problem.map { Wire.failure(id: id, $0) } ?? Wire.reply(id: id)
+
+        case "download.clear":
+            downloads.clear()
+            return Wire.reply(id: id)
+
+        case "clipboard.set":
+            guard let text = req.string("text") else { return Wire.failure(id: id, "missing text") }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            return Wire.reply(id: id)
+
         case "shutdown":
             quitting = true
             DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -584,6 +713,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
                 "window_title": window.title,
                 "content": ["w": container.bounds.width, "h": container.bounds.height],
                 "scale": window.backingScaleFactor,
+                "downloads": downloads.records.map(\.wire),
                 "first_responder": window.firstResponder.map { String(describing: Swift.type(of: $0)) } ?? "",
             ]
             if let activeID { fields["active"] = activeID }
@@ -593,6 +723,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             if let web = activeWebView {
                 fields["web_frame"] = ["x": web.frame.minX, "y": web.frame.minY, "w": web.frame.width, "h": web.frame.height]
                 fields["web_hidden"] = web.isHidden
+                fields["page_zoom"] = web.pageZoom
+                fields["magnification"] = web.magnification
+                fields["allows_magnification"] = web.allowsMagnification
             }
             conn.send(Wire.reply(id: id, fields))
 
@@ -600,6 +733,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             // Synthesised clicks are only delivered to views of the active app.
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+            conn.send(Wire.reply(id: id))
+
+        case "debug.open_url":
+            // What macOS does when a link is clicked in another app.
+            if let url = URL(string: req.string("url") ?? "") { openExternally([url]) }
             conn.send(Wire.reply(id: id))
 
         case "debug.type":

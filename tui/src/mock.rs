@@ -192,6 +192,9 @@ impl MockEngine {
                     out.push(json!({"event": "focus.changed", "mode": granted}).to_string());
                 }
             }
+            "clipboard.set" => out.push(ok(json!({}))),
+            "download.list" => out.push(ok(json!({"downloads": []}))),
+            "download.open" | "download.reveal" | "download.cancel" | "download.remove" | "download.clear" => out.push(ok(json!({}))),
             "shutdown" => {
                 self.shut_down = true;
                 out.push(ok(json!({})));

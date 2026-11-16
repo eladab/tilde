@@ -10,8 +10,8 @@ giving up real-browser fidelity for the page: video, WebGL, passkeys, smooth
 scrolling, IME.
 
 > Status: phase 1 is built, plus spaces (separate sets of tabs with their own
-> colour and profile), pinned tabs, tab renaming, a sidebar toggle and a key
-> reference. See [docs/HANDOFF-phase-1.md](docs/HANDOFF-phase-1.md)
+> colour and profile), pinned tabs, tab renaming, a sidebar toggle, downloads,
+> history and a key reference. See [docs/HANDOFF-phase-1.md](docs/HANDOFF-phase-1.md)
 > for what is and is not verified.
 
 ```
@@ -80,10 +80,23 @@ as they are.
 ./scripts/bundle.sh        # release build → build/Tilde.app
 open build/Tilde.app
 
+./scripts/dmg.sh           # build/Tilde-<version>.dmg, for drag-to-Applications install
+
 ./scripts/test.sh          # unit tests of both halves
 python3 scripts/e2e.py     # end-to-end checks on a private copy of build/Tilde.app
                            # (add --background to keep it behind your windows)
 ```
+
+`bundle.sh` signs the app with the first code-signing identity in your keychain
+(or the one named by `TILDE_SIGN_IDENTITY`), and ad hoc if there is none. With
+an ad-hoc signature macOS treats every build as a different app, so keychain
+questions such as "Tilde wants to use … Tilde WebCrypto Master Key" (asked by
+WebKit for sites like WhatsApp Web) return after each rebuild.
+
+The disk image is signed with the same identity but is not notarized, so on a
+Mac other than the one that built it Gatekeeper refuses it until the user
+allows it in System Settings → Privacy & Security. Distributing it properly
+needs a Developer ID certificate and notarization.
 
 With [`just`](https://github.com/casey/just) installed: `just run`, `just test`,
 `just dev` (debug build, no bundle), `just mock` (the TUI alone against a fake
@@ -110,19 +123,31 @@ In NAV mode:
 | `N` | New space |
 | `e` | Edit the space: name, colour, background, art, profile |
 | `D` | Delete the space (asks first) |
+| `y` | History |
+| `d` | Downloads |
 | `?` | Key reference |
 | `q` | Quit |
 
-In both modes: `Cmd+.` switches mode, `Cmd+L` edits the URL, `Cmd+T` and
+In both modes: `Cmd+.` switches mode, `Cmd+L` edits the URL (and `Cmd+C` then copies it), `Cmd+T` and
 `Cmd+W` open and close tabs, `Cmd+R` reloads, `Cmd+[` and `Cmd+]` go back and
 forward, `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle tabs, `Cmd+1`…`Cmd+9` select one,
-`Cmd+B` toggles the sidebar, `Cmd+D` pins or unpins, `Cmd+Shift+H` returns to
-the pinned page, `Cmd+/` shows the key reference, `Opt+Cmd+←` and `Opt+Cmd+→`
+`Cmd+B` toggles the sidebar, `Cmd+Plus` and `Cmd+Minus` make the page larger
+and smaller (`Cmd+0` restores its actual size, and pinching on the trackpad
+zooms too), `Cmd+D` pins or unpins, `Cmd+Shift+H` returns to
+the pinned page, `Cmd+Y` shows the history, `Opt+Cmd+L` the downloads, `Cmd+/` the key reference, `Opt+Cmd+←` and `Opt+Cmd+→`
 switch space, `Ctrl+1`…`Ctrl+9` select one, `Cmd+Shift+N` makes a new one.
 `Cmd+\` fills the focused page field from the macOS Passwords app: pick a login
 in the system picker, then its username or password.
 Cmd-click opens a link in a background tab. Rename is in the Tabs menu; editing
 and deleting spaces are in the Spaces menu.
+
+### Default browser
+
+Tilde opens web links and HTML files for other apps: each becomes a new tab of
+the space that is showing. To make it the default browser, install it in
+`/Applications` (from the disk image), open it once, then either choose
+**Tilde → Make Tilde the Default Browser…** or pick Tilde under System Settings
+→ Desktop & Dock → Default web browser. macOS asks you to confirm.
 
 ### Spaces
 
@@ -161,14 +186,67 @@ to move a tab between spaces or to erase a profile.
 
 Pinned tabs are the top section of the sidebar, above a rule. Pinning records
 the tab's address at that moment; browsing elsewhere does not move it, and `P`
-goes back to it. Closing a pinned tab unloads its page but keeps the pin; unpin
+goes back to it. It records the page's title too, and the tab keeps showing
+that title while it is on the same site (the same host, ignoring `www.`); on
+another site it shows that page's title, until it comes back. A name given with
+`n` always shows. Closing a pinned tab unloads its page but keeps the pin; unpin
 it first to remove it. Pins belong to the space they were made in. Pins, names
 and the sidebar state are saved in the session.
+
+### Downloads
+
+A page that offers a file (a link marked for download, a response the server
+says to save, or a type WebKit cannot show) downloads it to `~/Downloads`; a
+name already taken gets a number. While a download runs, the status line shows
+its name and progress; when it ends it shows the name with a tick until the
+Downloads view has been opened. Clicking that notice opens the view.
+
+The Downloads view (`d`, or `Opt+Cmd+L`) lists every download, running and
+past, newest first. It is one list for the whole browser, whatever space is
+showing.
+
+| Key | Action |
+|---|---|
+| `j` / `k` | Move |
+| `Enter` or `o` | Open the file |
+| `f` | Show it in the Finder |
+| `x` | Stop a running download; take a finished one off the list |
+| `C` | Clear the list (running downloads stay) |
+| `Esc` | Close the view |
+
+Taking a download off the list never deletes its file. A download that is
+stopped or fails leaves no partial file, and one that was running when Tilde
+quit is listed as failed; downloads are not resumed.
+
+### History
+
+Every page visited is recorded with the time and the space it was visited in.
+The History view (`y`, or `Cmd+Y`) lists them all, from every space, newest
+first: pages of the last hour under "Recent", then "Earlier today", then
+"Yesterday", then one heading per date. Each line ends with its space, in the
+space's colour. A page visited again on the same day is listed once, at its
+latest time.
+
+| Key | Action |
+|---|---|
+| `j` / `k`, `g` / `G`, `Ctrl+D` / `Ctrl+U` | Move by line, to either end, by screenful |
+| `Enter` | Open the page in a new tab of the current space |
+| `s` | Open it in a new tab of the space it was visited in |
+| `x` | Forget this visit |
+| `C` | Clear all history (asks first) |
+| `Esc` | Close the view |
+
+Restoring tabs at launch is not a visit, and neither are blank or `data:` pages.
+The newest 10,000 visits are kept. There is no search yet.
+
+Both views take the place of the page, like the key reference, and a click on a
+line selects it (a second click opens it).
 
 The key reference (`?`) is shown in the page area, since nothing can be drawn
 over the page; any key puts the page back.
 
-Files: session in `~/Library/Application Support/tilde/session.json`, logs in
+Files: session, `history.json` and `downloads.json` in
+`~/Library/Application Support/tilde/`, logs in
 `~/Library/Logs/tilde/`.
 
 ## Requirements
@@ -182,9 +260,9 @@ Files: session in `~/Library/Application Support/tilde/session.json`, logs in
 | Phase | Theme | Contents |
 |---|---|---|
 | 1 (built) | Foundation | App shell with embedded terminal, engine, TUI. Vertical tab list, URL bar, back/forward/reload, NAV/PAGE modes, session restore. See the handoff. |
-| 2 | Daily driver | Command palette, history and URL autocomplete, find in page, downloads, zoom, JS dialogs / HTTP auth / file pickers, context menu actions, favicons in the sidebar, TUI popups over the page (page swapped for a still snapshot while they are open) |
+| 2 | Daily driver | Command palette, URL autocomplete from history, find in page, resuming downloads, JS dialogs / HTTP auth / file pickers, context menu actions, favicons in the sidebar, TUI popups over the page (page swapped for a still snapshot while they are open) |
 | 3 | Arc-style organisation | Folders, favourites, tab archiving, split view (several web views), peek windows, moving tabs between spaces, erasing a profile, multiple windows |
-| 4 | Power features | Content blocking (`WKContentRuleList`), userscripts / per-site styles, WebExtensions (`WKWebExtension`), reader mode, picture-in-picture, Web Inspector, passkeys and password autofill, default-browser registration, themes and font configuration |
+| 4 | Power features | Content blocking (`WKContentRuleList`), userscripts / per-site styles, WebExtensions (`WKWebExtension`), reader mode, picture-in-picture, Web Inspector, passkeys and password autofill, themes and font configuration |
 | 5 | Beyond the app | Running the TUI in the user's own terminal (overlay or in-band frame streaming), remote use |
 
 ## Repository layout
@@ -200,8 +278,8 @@ tilde/
 │       ├── TildeCore/        URL-bar resolution, wire format (unit tested)
 │       └── Tilde/            window, terminal host, tab store, socket server
 ├── tui/                     Rust crate → tilde-tui
-│   └── src/                 app logic, drawing, protocol, mock engine
-├── scripts/                 bundle.sh, test.sh, e2e.py, make-icon.sh
+│   └── src/                 app logic, views, history, drawing, protocol, mock engine
+├── scripts/                 bundle.sh, dmg.sh, test.sh, e2e.py, make-icon.sh
 └── justfile                 thin wrappers over scripts/
 ```
 

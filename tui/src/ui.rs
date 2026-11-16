@@ -2,7 +2,10 @@
 
 use crate::app::{App, EditKind, SideRow};
 use crate::art::{self, Art, BACKGROUNDS};
+use crate::history::{self, Row};
 use crate::keys;
+use crate::resolve::display_host;
+use crate::views::{self, View};
 use crate::spaces::{FormField, SpaceForm, COLORS};
 use crate::protocol::Mode;
 use ratatui::buffer::Buffer;
@@ -325,6 +328,11 @@ fn draw_viewport(buf: &mut Buffer, app: &App) {
         // The page covers these cells; they stay blank.
         return;
     }
+    match app.view {
+        Some(View::History) => return draw_history(buf, app, &p),
+        Some(View::Downloads) => return draw_downloads(buf, app, &p),
+        None => {}
+    }
     if let Some(form) = &app.form {
         draw_space_form(buf, view, form, &p);
         return;
@@ -550,6 +558,173 @@ fn draw_help(buf: &mut Buffer, view: Rect, p: &Palette) {
     put(buf, view.x + (view.width.saturating_sub(shown.width() as u16)) / 2, y, view.width, &shown, dim);
 }
 
+/// The heading of a view: its name, how much it holds, and a rule of thumb
+/// for what the keys do. Returns nothing; the list starts at `App::view_list`.
+fn draw_view_heading(buf: &mut Buffer, app: &App, p: &Palette, name: &str, detail: &str) {
+    let view = app.layout.viewport;
+    let list = app.view_list();
+    if view.height < 2 || list.width == 0 {
+        return;
+    }
+    let y = view.y + 1;
+    put(buf, list.x, y, list.width, name, Style::default().fg(TEXT).bg(p.bg).add_modifier(Modifier::BOLD));
+    let x = list.x + name.width() as u16 + 2;
+    if x < list.x + list.width {
+        put(buf, x, y, list.x + list.width - x, detail, Style::default().fg(DIM).bg(p.bg));
+    }
+}
+
+/// The view's own keys, along the bottom of the page area. They run on to
+/// the last line when one line is too narrow for them.
+fn draw_view_keys(buf: &mut Buffer, app: &App, p: &Palette, keys: &[(&str, &str)]) {
+    let view = app.layout.viewport;
+    let list = app.view_list();
+    if view.height < 6 || list.width == 0 {
+        return;
+    }
+    let mut y = view.y + view.height - 2;
+    let end = list.x + list.width;
+    let mut x = list.x;
+    for (key, what) in keys {
+        let width = (key.width() + 1 + what.width()) as u16;
+        if x + width > end {
+            if x == list.x || y + 1 >= view.y + view.height {
+                break;
+            }
+            x = list.x;
+            y += 1;
+        }
+        put(buf, x, y, end - x, key, Style::default().fg(ACCENT).bg(p.bg).add_modifier(Modifier::BOLD));
+        put(buf, x + key.width() as u16 + 1, y, end - x, what, Style::default().fg(DIM).bg(p.bg));
+        x += width + 3;
+    }
+}
+
+fn draw_view_empty(buf: &mut Buffer, app: &App, p: &Palette, text: &str) {
+    let list = app.view_list();
+    if list.height > 0 {
+        put(buf, list.x, list.y, list.width, text, Style::default().fg(DIM).bg(p.bg));
+    }
+}
+
+/// Every page visited, newest first, under headings by time.
+fn draw_history(buf: &mut Buffer, app: &App, p: &Palette) {
+    let count = app.history.len();
+    if app.confirm_clear {
+        let list = app.view_list();
+        draw_view_heading(buf, app, p, "History", "");
+        let x = list.x + "History".width() as u16 + 2;
+        put(buf, x, app.layout.viewport.y + 1, (list.x + list.width).saturating_sub(x), "Clear all history?   y clears   any other key keeps it",
+            Style::default().fg(YELLOW).bg(p.bg));
+    } else {
+        draw_view_heading(buf, app, p, "History", &format!("{count} page{}, in every space", if count == 1 { "" } else { "s" }));
+    }
+    draw_view_keys(buf, app, p, keys::HISTORY);
+    if count == 0 {
+        return draw_view_empty(buf, app, p, "No pages visited yet.");
+    }
+    let list = app.view_list();
+    let width = list.width as usize;
+    // Time, title, then (when there is room) the site, then the space.
+    let space_w = 16.min(width / 4);
+    let host_w = if width >= 70 { 24 } else { 0 };
+    let title_w = width.saturating_sub(7 + space_w + host_w + if host_w > 0 { 2 } else { 0 } + 2);
+    let rows = app.history_rows();
+    for (line, row) in rows.iter().skip(app.view_scroll).take(list.height as usize).enumerate() {
+        let y = list.y + line as u16;
+        match row {
+            Row::Header(title) => put(buf, list.x, y, list.width, title, Style::default().fg(YELLOW).bg(p.bg).add_modifier(Modifier::BOLD)),
+            Row::Item(index) => {
+                let Some(visit) = app.history.get(*index) else { continue };
+                let selected = *index == app.view_selected;
+                let bg = if selected { p.selected } else { p.bg };
+                if selected {
+                    fill(buf, Rect::new(list.x, y, list.width, 1), Style::default().bg(bg));
+                }
+                let mut x = list.x + 1;
+                put(buf, x, y, 5, &history::clock(visit.time), Style::default().fg(DIM).bg(bg));
+                x += 7;
+                let title = if visit.title.is_empty() { visit.url.as_str() } else { visit.title.as_str() };
+                put(buf, x, y, title_w as u16, title, Style::default().fg(TEXT).bg(bg));
+                x += title_w as u16 + 2;
+                if host_w > 0 {
+                    put(buf, x, y, host_w as u16, &display_host(&visit.url), Style::default().fg(DIM).bg(bg));
+                    x += host_w as u16 + 2;
+                }
+                // The space is shown in its colour while it still exists.
+                let color = app.spaces.iter().find(|s| s.name == visit.space).map(|s| space_color(s.color)).unwrap_or(FAINT);
+                let room = (list.x + list.width).saturating_sub(x + 1);
+                if room > 2 && !visit.space.is_empty() {
+                    put(buf, x, y, room, &format!("● {}", visit.space), Style::default().fg(color).bg(bg));
+                }
+            }
+        }
+    }
+}
+
+/// A bar of `width` cells filled to `fraction`.
+fn progress_bar(fraction: f64, width: usize) -> String {
+    let filled = ((fraction.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+/// Every download, running and past, newest first.
+fn draw_downloads(buf: &mut Buffer, app: &App, p: &Palette) {
+    let count = app.downloads.len();
+    let running = app.downloads.iter().filter(|d| d.is_active()).count();
+    let detail = match (count, running) {
+        (0, _) => String::new(),
+        (_, 0) => format!("{count} file{}, saved in Downloads", if count == 1 { "" } else { "s" }),
+        _ => format!("{count} file{}, {running} in progress", if count == 1 { "" } else { "s" }),
+    };
+    draw_view_heading(buf, app, p, "Downloads", &detail);
+    draw_view_keys(buf, app, p, keys::DOWNLOADS);
+    if count == 0 {
+        return draw_view_empty(buf, app, p, "Nothing has been downloaded.");
+    }
+    let list = app.view_list();
+    let width = list.width as usize;
+    let now = app.now();
+    // File name, what became of it, then (when there is room) where it came from, then when.
+    let status_w = 34.min(width / 2);
+    let host_w = if width >= 84 { 20 } else { 0 };
+    let name_w = width.saturating_sub(status_w + host_w + if host_w > 0 { 2 } else { 0 } + 6 + 5);
+    for line in 0..list.height as usize {
+        let index = app.view_scroll + line;
+        let Some(download) = app.download_at(index) else { break };
+        let y = list.y + line as u16;
+        let selected = index == app.view_selected;
+        let bg = if selected { p.selected } else { p.bg };
+        if selected {
+            fill(buf, Rect::new(list.x, y, list.width, 1), Style::default().bg(bg));
+        }
+        let (status, color) = match download.state.as_str() {
+            "active" if download.total > 0 => {
+                let fraction = download.received as f64 / download.total as f64;
+                let text = format!("{} {:>3}%  {} of {}", progress_bar(fraction, 10), (fraction * 100.0).floor().min(100.0) as u32,
+                    views::size(download.received), views::size(download.total));
+                (text, ACCENT)
+            }
+            "active" => (format!("{} so far", views::size(download.received)), ACCENT),
+            "done" => (format!("✓ {}", views::size(download.total.max(download.received))), GREEN),
+            "cancelled" => ("Cancelled".to_string(), DIM),
+            _ => (format!("Failed: {}", download.error.as_deref().unwrap_or("unknown error")), RED),
+        };
+        let gone = !download.is_active() && download.state != "done";
+        let mut x = list.x + 1;
+        put(buf, x, y, name_w as u16, &download.filename, Style::default().fg(if gone { DIM } else { TEXT }).bg(bg));
+        x += name_w as u16 + 2;
+        put(buf, x, y, status_w as u16, &status, Style::default().fg(color).bg(bg));
+        x += status_w as u16 + 2;
+        if host_w > 0 {
+            put(buf, x, y, host_w as u16, &display_host(&download.url), Style::default().fg(DIM).bg(bg));
+            x += host_w as u16 + 2;
+        }
+        let when = if history::is_today(download.started, now) { history::clock(download.started) } else { history::short_date(download.started) };
+        put(buf, x, y, (list.x + list.width).saturating_sub(x), &when, Style::default().fg(DIM).bg(bg));
+    }
+}
+
 fn draw_status(buf: &mut Buffer, app: &App) {
     let p = Palette::of(app);
     let bar = app.layout.status;
@@ -583,6 +758,9 @@ fn draw_status(buf: &mut Buffer, app: &App) {
         segment(buf, &format!(" {} ", fit(&space.name, 16)), Style::default().bg(p.panel).fg(space_color(space.color)).add_modifier(Modifier::BOLD));
         segment(buf, &format!("{}/{count} {pin}{label} ", app.selected + 1), Style::default().bg(p.panel).fg(TEXT));
     }
+    if let Some((notice, failed)) = app.download_notice().filter(|_| app.view != Some(View::Downloads)) {
+        segment(buf, &format!(" {} ", fit(&notice, 40)), Style::default().bg(p.panel).fg(if failed { RED } else { ACCENT }));
+    }
     if let Some(message) = &app.message {
         segment(buf, &format!(" {message} "), Style::default().bg(p.panel).fg(YELLOW));
     } else if let Some(tab) = app.current().filter(|t| t.loading) {
@@ -590,7 +768,10 @@ fn draw_status(buf: &mut Buffer, app: &App) {
         segment(buf, &format!(" Loading… {percent}% "), Style::default().bg(p.panel).fg(YELLOW));
     }
 
-    let hint = if app.help {
+    let hint = if app.view.is_some() {
+        // The view lists its own keys along its bottom edge.
+        ""
+    } else if app.help {
         "any key closes"
     } else if app.form.is_some() || app.confirm_delete {
         ""
@@ -601,7 +782,7 @@ fn draw_status(buf: &mut Buffer, app: &App) {
         }
     } else {
         match app.mode {
-            Mode::Nav => "j/k tabs   o url   t new   x close   ⏎ page   ? keys",
+            Mode::Nav => "j/k tabs   o url   t new   x close   y history   d downloads   ? keys",
             Mode::Page => "⌘. tabs   ⌘L url   ⌘T new   ⌘/ keys",
         }
     };

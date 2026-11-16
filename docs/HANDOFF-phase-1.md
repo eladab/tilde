@@ -164,6 +164,10 @@ Requests (TUI → app):
 | `tab.navigate` | `tab_id`, `input` | Raw URL bar text; the app resolves URL vs. search. Reply includes the resolved `url` (added) |
 | `tab.back` / `tab.forward` / `tab.reload` / `tab.stop` | `tab_id` | |
 | `focus.set` | `mode: "nav" \| "page"` | Reply includes the resulting `mode` (added); `page` is refused while no page is on screen |
+| `download.list` | | Reply has `downloads`, oldest first (added). A download is `download_id`, `url`, `filename`, `path`, `state` (`active`, `done`, `failed`, `cancelled`), `received`, `total` (0 while unknown), `started`, `error` |
+| `download.open` / `download.reveal` / `download.cancel` / `download.remove` | `download_id` | Open the file, show it in the Finder, stop it, take it off the list (added). `open` fails with a sentence for the user when the file is gone |
+| `download.clear` | | Takes every download that is not running off the list (added) |
+| `clipboard.set` | `text` | Puts text on the system clipboard (added). Sent in answer to the `copy` command, which the app emits for Cmd+C while the terminal has focus |
 | `shutdown` | | App quits cleanly |
 
 Events (app → TUI):
@@ -175,6 +179,8 @@ Events (app → TUI):
 | `tab.closed` | `tab_id` (`window.close()`) |
 | `tab.crashed` | `tab_id` (web content process terminated; TUI offers reload) |
 | `focus.changed` | `mode` |
+| `download.updated` | the download's fields: one download started, progressed or ended (added) |
+| `downloads.changed` | `downloads`: the whole list, sent when downloads are taken off it (added) |
 | `command` | `name`, `arg?` (a menu shortcut) |
 
 URL bar input resolution: has a scheme → use as is; looks like a host

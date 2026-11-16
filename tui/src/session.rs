@@ -18,6 +18,9 @@ pub struct SessionTab {
     /// Where "return to pinned page" goes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_url: Option<String>,
+    /// The page title the tab was pinned under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_title: Option<String>,
     /// A name the user gave the tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -135,6 +138,7 @@ mod tests {
                     tab_id: Some(3),
                     pinned: true,
                     pin_url: Some("https://a.example".into()),
+                    pin_title: Some("A Mail".into()),
                     name: Some("Mail".into()),
                 },
                         SessionTab { url: "https://b.example".into(), ..Default::default() },

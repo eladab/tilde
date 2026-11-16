@@ -35,6 +35,10 @@ enum MainMenu {
         }
 
         let app = submenu("Tilde")
+        let makeDefault = NSMenuItem(title: "Make Tilde the Default Browser…", action: #selector(AppController.makeDefaultBrowser(_:)), keyEquivalent: "")
+        makeDefault.target = target
+        app.addItem(makeDefault)
+        app.addItem(.separator())
         standard(app, "Hide Tilde", #selector(NSApplication.hide(_:)), key: "h")
         app.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Tilde", action: #selector(AppController.quitRequested(_:)), keyEquivalent: "q")
@@ -52,7 +56,9 @@ enum MainMenu {
         standard(edit, "Redo", Selector(("redo:")), key: "z", mods: [.command, .shift])
         edit.addItem(.separator())
         standard(edit, "Cut", #selector(NSText.cut(_:)), key: "x")
-        standard(edit, "Copy", #selector(NSText.copy(_:)), key: "c")
+        let copy = NSMenuItem(title: "Copy", action: #selector(AppController.copyRequested(_:)), keyEquivalent: "c")
+        copy.target = target
+        edit.addItem(copy)
         standard(edit, "Paste", #selector(NSText.paste(_:)), key: "v")
         standard(edit, "Select All", #selector(NSText.selectAll(_:)), key: "a")
         edit.addItem(.separator())
@@ -64,10 +70,26 @@ enum MainMenu {
         command(view, "Reload Page", "reload", key: "r")
         command(view, "Switch Between Tabs and Page", "toggle-mode", key: ".")
         command(view, "Show or Hide Sidebar", "toggle-sidebar", key: "b")
+        command(view, "Downloads", "downloads", key: "l", mods: [.command, .option])
+        view.addItem(.separator())
+        func zoom(_ title: String, _ action: Selector, key: String, hidden: Bool = false) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = target
+            item.isHidden = hidden
+            item.allowsKeyEquivalentWhenHidden = true
+            view.addItem(item)
+        }
+        zoom("Actual Size", #selector(AppController.zoomReset(_:)), key: "0")
+        zoom("Zoom In", #selector(AppController.zoomIn(_:)), key: "+")
+        // Cmd+= is the same key without Shift; nobody expects to need Shift.
+        zoom("Zoom In", #selector(AppController.zoomIn(_:)), key: "=", hidden: true)
+        zoom("Zoom Out", #selector(AppController.zoomOut(_:)), key: "-")
 
         let history = submenu("History")
         command(history, "Back", "back", key: "[")
         command(history, "Forward", "forward", key: "]")
+        history.addItem(.separator())
+        command(history, "Show All History", "history", key: "y")
 
         let tabs = submenu("Tabs")
         command(tabs, "Next Tab", "next-tab", key: "\t", mods: .control)

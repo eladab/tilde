@@ -130,7 +130,7 @@ fn editing_the_url_navigates_the_current_tab() {
 
 #[test]
 fn url_editing_keys() {
-    let (mut app, _engine) = start();
+    let (mut app, engine) = start();
     key(&mut app, 'o');
     press(&mut app, KeyCode::Left);
     assert!(!app.edit.as_ref().unwrap().replace_on_type, "moving the cursor keeps the text");
@@ -145,6 +145,10 @@ fn url_editing_keys() {
     assert_eq!(app.edit.as_ref().unwrap().text, "xabc ");
     app.handle_paste("pasted\ntext");
     assert_eq!(app.edit.as_ref().unwrap().text, "xpastedtextabc ");
+    command(&mut app, "copy");
+    assert_eq!(app.edit.as_ref().unwrap().text, "xpastedtextabc ", "copying leaves the field as it was");
+    let copied = engine.borrow().log.iter().rev().find(|r| r["method"] == "clipboard.set").cloned().unwrap();
+    assert_eq!(copied["text"], "xpastedtextabc ");
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.tabs[0].url, HOME_URL, "cancel leaves the tab alone");
 }
@@ -538,6 +542,49 @@ fn a_pinned_tab_returns_to_its_pinned_page() {
 }
 
 #[test]
+fn a_pinned_tab_keeps_its_name_within_its_site() {
+    let (mut app, _engine) = three_tabs();
+    let id = app.tabs[2].tab_id.unwrap();
+    let update = |app: &mut App, url: &str, title: &str| {
+        app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{id},"url":"{url}","title":"{title}"}}"#));
+    };
+    update(&mut app, "https://b.example", "Bee Mail");
+    key(&mut app, 'p');
+    assert_eq!(app.tabs[0].pin_title.as_deref(), Some("Bee Mail"));
+
+    update(&mut app, "https://www.b.example/inbox/42", "Re: lunch");
+    assert_eq!(app.tabs[0].label(), "Bee Mail", "another page of the same site");
+    update(&mut app, "https://other.example/", "Elsewhere");
+    assert_eq!(app.tabs[0].label(), "Elsewhere", "another site shows its own title");
+    update(&mut app, "https://b.example/sent", "Sent");
+    assert_eq!(app.tabs[0].label(), "Bee Mail", "back on the pinned site");
+
+    key(&mut app, 'n');
+    type_text(&mut app, "Post");
+    press(&mut app, KeyCode::Enter);
+    update(&mut app, "https://other.example/", "Elsewhere");
+    assert_eq!(app.tabs[0].label(), "Post", "a name the user gave always shows");
+    app.tabs[0].name = None;
+
+    key(&mut app, 'p'); // unpin
+    assert_eq!(app.tabs[0].pin_title, None);
+    update(&mut app, "https://b.example/sent", "Sent");
+    assert_eq!(app.tabs[0].label(), "Sent");
+}
+
+#[test]
+fn a_pin_without_a_title_is_named_by_its_pinned_page() {
+    let (mut app, _engine) = three_tabs();
+    let id = app.tabs[2].tab_id.unwrap();
+    app.tabs[2].title.clear();
+    key(&mut app, 'p');
+    assert_eq!(app.tabs[0].pin_title, None);
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{id},"url":"https://b.example","title":"Bee Mail"}}"#));
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{id},"url":"https://b.example/x","title":"Deep"}}"#));
+    assert_eq!(app.tabs[0].label(), "Bee Mail");
+}
+
+#[test]
 fn closing_a_pinned_tab_unloads_it_but_keeps_the_pin() {
     let (mut app, engine) = three_tabs();
     key(&mut app, 'p');
@@ -662,6 +709,7 @@ fn pins_names_and_sidebar_survive_a_restart() {
     assert_eq!(app.tabs[0].label(), "Bee");
     assert_eq!(app.tabs[0].url, "https://b.example/later", "a pin reopens where it was left");
     assert_eq!(app.tabs[0].pin_url.as_deref(), Some("https://b.example"));
+    assert_eq!(app.tabs[0].pin_title.as_deref(), Some("b.example"), "the pinned title is saved too");
     assert_eq!(app.selected, 0);
     key(&mut app, 'P');
     assert_eq!(fresh.borrow().url_of(app.tabs[0].tab_id.unwrap()).unwrap(), "https://b.example");
@@ -1364,4 +1412,264 @@ fn backgrounds_and_art_survive_a_restart_per_space() {
     let app = start_with(fresh, Some(path.clone()));
     assert_eq!((app.current_space().background, app.current_space().art), (0, 0));
     let _ = std::fs::remove_file(&path);
+}
+
+// ----- history and downloads -----
+
+/// Saturday 14 November 2026, 15:00 (tests read the clock as UTC).
+const NOW: u64 = 1_794_668_400;
+
+fn history_urls(app: &App) -> Vec<String> {
+    (0..app.history.len()).map(|i| app.history.get(i).unwrap().url.clone()).collect()
+}
+
+fn last_request(engine: &Engine, method: &str) -> Option<serde_json::Value> {
+    engine.borrow().log.iter().rev().find(|r| r["method"] == method).cloned()
+}
+
+#[test]
+fn visits_are_recorded_with_their_space() {
+    let (mut app, _engine) = start();
+    app.now_override = Some(NOW - 7200);
+    open(&mut app, "a.example");
+    app.now_override = Some(NOW - 60);
+    open(&mut app, "b.example");
+    new_space(&mut app, "Work", "");
+    app.now_override = Some(NOW);
+    type_text(&mut app, "c.example/page");
+    press(&mut app, KeyCode::Enter);
+
+    let seen: Vec<(String, String)> = (0..app.history.len()).map(|i| app.history.get(i).unwrap()).map(|v| (v.url.clone(), v.space.clone())).collect();
+    assert_eq!(
+        seen[..3],
+        [
+            ("https://c.example/page".to_string(), "Work".to_string()),
+            ("https://b.example".to_string(), "Home".to_string()),
+            ("https://a.example".to_string(), "Home".to_string()),
+        ]
+    );
+    assert_eq!(app.history.get(1).unwrap().title, "b.example", "the page's title is filled in");
+
+    // Going back and forth between tabs is not visiting.
+    let count = app.history.len();
+    command(&mut app, "toggle-mode");
+    key(&mut app, 'h');
+    key(&mut app, 'j');
+    key(&mut app, 'k');
+    assert_eq!(app.history.len(), count);
+}
+
+#[test]
+fn the_history_view_opens_pages_and_forgets_them() {
+    let (mut app, engine) = start();
+    app.now_override = Some(NOW - 2 * 86_400);
+    open(&mut app, "old.example");
+    app.now_override = Some(NOW - 5 * 3600);
+    open(&mut app, "morning.example");
+    new_space(&mut app, "Work", "");
+    app.now_override = Some(NOW - 60);
+    type_text(&mut app, "work.example");
+    press(&mut app, KeyCode::Enter);
+    app.now_override = Some(NOW);
+    assert_eq!(app.mode, Mode::Page);
+
+    command(&mut app, "history");
+    assert_eq!(app.mode, Mode::Nav);
+    assert!(!app.page_visible(), "the view takes the page's place");
+    let screen = render(&mut app, 120, 20);
+    println!("{screen}");
+    for expected in ["History", "Recent", "Earlier today", "Thursday, 12 November", "work.example", "● Work", "● Home", "10:00",
+                     "⏎ open in new tab", "s in its space", "x forget", "C clear all", "esc close"] {
+        assert!(screen.contains(expected), "the history view shows {expected:?}");
+    }
+    let recent = screen.find("Recent").unwrap();
+    assert!(recent < screen.find("Earlier today").unwrap() && screen.find("Earlier today").unwrap() < screen.find("Thursday").unwrap());
+
+    // Forget the newest, then open the next in a new tab of the current space.
+    let before = history_urls(&app);
+    key(&mut app, 'x');
+    assert_eq!(history_urls(&app), before[1..]);
+    key(&mut app, 'j');
+    let wanted = app.history.get(app.view_selected).unwrap().url.clone();
+    let tabs = app.tabs.len();
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.view, None);
+    assert_eq!(app.current_space().name, "Work");
+    assert_eq!(app.tabs.len(), tabs + 1);
+    assert_eq!(app.current().unwrap().url, wanted);
+    assert_eq!(last_request(&engine, "tab.create").unwrap()["url"], wanted.as_str());
+    assert_eq!(app.mode, Mode::Page, "the opened page takes the keyboard");
+
+    // `s` opens a page in the space it was visited in.
+    command(&mut app, "history");
+    key(&mut app, 'G');
+    assert_eq!(app.history.get(app.view_selected).unwrap().space, "Home");
+    key(&mut app, 's');
+    assert_eq!(app.current_space().name, "Home");
+    assert_eq!(app.current().unwrap().url, "https://old.example");
+
+    // Clearing asks first.
+    key(&mut app, 'y');
+    assert_eq!(app.view, Some(crate::views::View::History));
+    key(&mut app, 'C');
+    key(&mut app, 'n');
+    assert!(!app.history.is_empty());
+    key(&mut app, 'C');
+    assert!(render(&mut app, 120, 20).contains("Clear all history?"));
+    key(&mut app, 'y');
+    assert!(app.history.is_empty());
+    assert!(render(&mut app, 120, 20).contains("No pages visited yet."));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.view, None);
+    assert!(app.page_visible());
+}
+
+#[test]
+fn history_survives_a_restart_and_restoring_is_not_visiting() {
+    let path = temp_session("history");
+    let history_path = crate::history::path_beside(&path);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&history_path);
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let mut app = start_with(engine, Some(path.clone()));
+    open(&mut app, "a.example");
+    let before = history_urls(&app);
+    assert!(before.contains(&"https://a.example".to_string()));
+    app.quit();
+
+    let mut saved = session::load(&path).unwrap();
+    saved.instance = Some(999);
+    session::save(&path, &saved).unwrap();
+    let mut app = start_with(Rc::new(RefCell::new(MockEngine::new())), Some(path.clone()));
+    assert_eq!(history_urls(&app), before);
+    key(&mut app, 'k');
+    key(&mut app, 'j');
+    assert_eq!(history_urls(&app), before, "tabs loading again after a restart add nothing");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&history_path);
+}
+
+fn download_event(id: u64, name: &str, state: &str, received: u64, total: u64) -> String {
+    format!(
+        r#"{{"event":"download.updated","download_id":{id},"url":"https://files.example/{name}","filename":"{name}","path":"/tmp/{name}","state":"{state}","received":{received},"total":{total},"started":{}}}"#,
+        NOW - 30
+    )
+}
+
+#[test]
+fn downloads_show_in_the_status_line_and_in_their_view() {
+    let (mut app, engine) = three_tabs();
+    app.now_override = Some(NOW);
+    assert_eq!(app.download_notice(), None);
+    app.handle_line(&download_event(1, "old.pdf", "done", 2_000_000, 2_000_000));
+    app.handle_line(&download_event(2, "big.zip", "active", 0, 40_000_000));
+    app.handle_line(&download_event(2, "big.zip", "active", 10_000_000, 40_000_000));
+    assert_eq!(app.download_notice(), Some(("↓ big.zip 25%".to_string(), false)));
+    let screen = render(&mut app, 120, 16);
+    assert!(screen.lines().last().unwrap().contains("↓ big.zip 25%"), "the status line reports the download");
+
+    key(&mut app, 'd');
+    assert_eq!(app.view, Some(crate::views::View::Downloads));
+    let screen = render(&mut app, 120, 16);
+    println!("{screen}");
+    for expected in ["Downloads", "2 files, 1 in progress", "big.zip", "25%", "10 MB of 40 MB", "old.pdf", "✓ 2.0 MB", "files.example", "14:59",
+                     "⏎ open", "f show in Finder", "x stop or remove", "C clear list", "esc close"] {
+        assert!(screen.contains(expected), "the downloads view shows {expected:?}");
+    }
+    assert!(screen.find("big.zip").unwrap() < screen.find("old.pdf").unwrap(), "newest first");
+
+    // The running one is selected: x stops it, Enter and f act on the finished one.
+    key(&mut app, 'x');
+    assert_eq!(last_request(&engine, "download.cancel").unwrap()["download_id"], 2);
+    app.handle_line(&download_event(2, "big.zip", "cancelled", 10_000_000, 40_000_000));
+    key(&mut app, 'x');
+    assert_eq!(last_request(&engine, "download.remove").unwrap()["download_id"], 2);
+    app.handle_line(r#"{"event":"downloads.changed","downloads":[{"download_id":1,"filename":"old.pdf","state":"done","received":2000000,"total":2000000}]}"#);
+    assert_eq!(app.downloads.len(), 1);
+    assert_eq!(app.view_selected, 0);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(last_request(&engine, "download.open").unwrap()["download_id"], 1);
+    key(&mut app, 'f');
+    assert_eq!(last_request(&engine, "download.reveal").unwrap()["download_id"], 1);
+    key(&mut app, 'C');
+    assert!(last_request(&engine, "download.clear").is_some());
+    app.handle_line(r#"{"event":"downloads.changed","downloads":[]}"#);
+    assert!(render(&mut app, 120, 16).contains("Nothing has been downloaded."));
+
+    // The list is the same in every space, and a finished download is announced until looked at.
+    press(&mut app, KeyCode::Esc);
+    new_space(&mut app, "Work", "");
+    press(&mut app, KeyCode::Esc);
+    app.handle_line(&download_event(3, "notes.txt", "active", 0, 0));
+    app.handle_line(&download_event(3, "notes.txt", "done", 12, 12));
+    assert_eq!(app.download_notice(), Some(("↓ notes.txt ✓".to_string(), false)));
+    key(&mut app, 'd');
+    assert_eq!(app.download_notice(), None);
+    assert!(render(&mut app, 120, 16).contains("notes.txt"));
+}
+
+#[test]
+fn a_failed_open_is_reported() {
+    let (mut app, _engine) = three_tabs();
+    app.handle_line(&download_event(1, "gone.pdf", "done", 5, 5));
+    key(&mut app, 'd');
+    // The mock always succeeds, so answer one request ourselves.
+    let id = app.next_request;
+    app.send(crate::protocol::Request::DownloadOpen { download_id: 99 }, crate::app::Pending::Notify);
+    assert_eq!(app.message, None);
+    app.pending.insert(id, crate::app::Pending::Notify);
+    app.handle_line(&format!(r#"{{"id":{id},"ok":false,"error":"The file is no longer where it was saved."}}"#));
+    assert_eq!(app.message.as_deref(), Some("The file is no longer where it was saved."));
+    assert!(render(&mut app, 120, 16).lines().last().unwrap().contains("no longer where it was saved"));
+}
+
+#[test]
+fn a_page_that_changes_its_own_address_is_one_visit() {
+    let (mut app, _engine) = three_tabs();
+    app.now_override = Some(NOW);
+    let id = app.tabs[2].tab_id.unwrap();
+    let before = app.history.len();
+    let update = |app: &mut App, url: &str, entry: u64, entry_url: &str, title: &str, loading: bool| {
+        app.handle_line(&format!(
+            r#"{{"event":"tab.updated","tab_id":{id},"url":"{url}","title":"{title}","loading":{loading},"entry":{entry},"entry_url":"{entry_url}"}}"#
+        ));
+    };
+    // The tab is restarted by a newer app that numbers its pages: the page it is on is not new.
+    update(&mut app, "https://b.example", 1, "https://b.example", "b.example", false);
+    assert_eq!(app.history.len(), before);
+
+    // A search: the address is on its way, then arrives, then the page rewrites it twice.
+    update(&mut app, "https://duckduckgo.com/?q=tilde", 1, "https://b.example", "b.example", true);
+    assert_eq!(app.history.len(), before, "an address that has not arrived is not a visit");
+    update(&mut app, "https://duckduckgo.com/?q=tilde", 2, "https://duckduckgo.com/?q=tilde", "", true);
+    update(&mut app, "https://duckduckgo.com/?q=tilde&ia=web", 2, "https://duckduckgo.com/?q=tilde&ia=web", "tilde at DuckDuckGo", true);
+    update(&mut app, "https://duckduckgo.com/?t=h_&q=tilde&ia=web", 2, "https://duckduckgo.com/?t=h_&q=tilde&ia=web", "tilde at DuckDuckGo", false);
+    assert_eq!(app.history.len(), before + 1, "one search, one line");
+    let top = app.history.get(0).unwrap();
+    assert_eq!((top.url.as_str(), top.title.as_str()), ("https://duckduckgo.com/?t=h_&q=tilde&ia=web", "tilde at DuckDuckGo"));
+
+    // Following a result is another page.
+    update(&mut app, "https://tilde.example/", 3, "https://tilde.example/", "Tilde", false);
+    assert_eq!(app.history.len(), before + 2);
+}
+
+#[test]
+fn a_link_from_another_app_opens_in_a_new_tab() {
+    let (mut app, engine) = three_tabs();
+    key(&mut app, 'y'); // whatever is covering the page gives way
+    app.handle_line(r#"{"event":"open-url","url":"https://clicked.example/x"}"#);
+    assert_eq!(app.view, None);
+    assert_eq!(app.tabs.len(), 4);
+    assert_eq!(app.current().unwrap().url, "https://clicked.example/x");
+    assert_eq!(last_request(&engine, "tab.create").unwrap()["url"], "https://clicked.example/x");
+    assert_eq!(app.mode, Mode::Page);
+    assert!(app.page_visible());
+    assert_eq!(app.history.get(0).unwrap().url, "https://clicked.example/x");
+
+    // While a new, still empty tab is open, the link takes its place.
+    command(&mut app, "new-tab");
+    assert_eq!(app.tabs.len(), 5);
+    app.handle_line(r#"{"event":"open-url","url":"https://second.example/"}"#);
+    assert_eq!(app.tabs.len(), 5);
+    assert_eq!(app.current().unwrap().url, "https://second.example/");
 }

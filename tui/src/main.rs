@@ -2,6 +2,7 @@ mod app;
 mod art;
 #[cfg(test)]
 mod app_tests;
+mod history;
 mod keys;
 mod spaces;
 mod mock;
@@ -10,6 +11,7 @@ mod resolve;
 mod session;
 mod transport;
 mod ui;
+mod views;
 
 use app::App;
 use ratatui::backend::CrosstermBackend;
@@ -191,7 +193,7 @@ fn run(
             next = rx.try_recv().ok();
         }
 
-        if app.session_dirty && last_save.elapsed() > Duration::from_millis(500) {
+        if (app.session_dirty || app.history.dirty) && last_save.elapsed() > Duration::from_millis(500) {
             app.save_session();
             last_save = Instant::now();
         }

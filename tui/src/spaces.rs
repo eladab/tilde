@@ -121,6 +121,7 @@ fn session_tabs(tabs: &[TabEntry], selected: usize) -> (Vec<SessionTab>, usize) 
             tab_id: entry.tab_id,
             pinned: entry.pinned,
             pin_url: entry.pin_url.clone(),
+            pin_title: entry.pin_title.clone(),
             name: entry.name.clone(),
         });
     }
@@ -159,7 +160,7 @@ impl App {
 
     /// Something other than the page is drawn in the page area.
     pub fn overlay_open(&self) -> bool {
-        self.help || self.form.is_some() || self.confirm_delete
+        self.help || self.form.is_some() || self.confirm_delete || self.view.is_some()
     }
 
     pub(crate) fn close_overlays(&mut self) {
@@ -168,7 +169,9 @@ impl App {
         }
         self.form = None;
         self.confirm_delete = false;
-        if self.help {
+        if self.view.is_some() {
+            self.close_view();
+        } else if self.help {
             self.close_help();
         } else {
             self.ensure_active();
@@ -314,6 +317,8 @@ impl App {
 
         if form.editing {
             let changed_profile = self.spaces[self.space].profile != profile;
+            let old_name = self.spaces[self.space].name.clone();
+            self.history.rename_space(&old_name, &name);
             let space = &mut self.spaces[self.space];
             space.name = name;
             space.color = form.color;
@@ -461,6 +466,7 @@ impl App {
                     title: tab.title.clone(),
                     pinned: tab.pinned,
                     pin_url: if tab.pinned { tab.pin_url.clone().or_else(|| Some(tab.url.clone())) } else { None },
+                    pin_title: tab.pin_title.clone().filter(|t| tab.pinned && !t.is_empty()),
                     name: tab.name.clone().filter(|n| !n.is_empty()),
                     ..Default::default()
                 };
@@ -512,6 +518,10 @@ impl App {
         }
         self.selected = self.selected.min(self.tabs.len() - 1);
 
+        // Pages that were already open are not visited again by being restored.
+        for entry in self.tabs.iter_mut().chain(self.spaces.iter_mut().flat_map(|s| s.tabs.iter_mut())) {
+            entry.recorded_url = entry.url.clone();
+        }
         self.active_sent = live_active;
         self.ready = true;
         self.session_dirty = true;

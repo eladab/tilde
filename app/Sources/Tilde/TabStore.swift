@@ -14,9 +14,31 @@ final class Tab {
         self.webView = webView
     }
 
+    /// Counts the pages this tab has arrived at, for the history. A page that
+    /// takes the place of the one before it (a redirect by script, an address
+    /// rewritten with `replaceState`, as search engines do) keeps the number,
+    /// so the history can tell "another page" from "the same page, renamed".
+    private var entry = 0
+    private var lastItem: WKBackForwardListItem?
+    private var lastBackCount = 0
+
+    private func refreshEntry() {
+        let list = webView.backForwardList
+        guard let item = list.currentItem else { return }
+        let back = list.backList.count
+        // A replacement leaves the number of pages behind this one unchanged.
+        if lastItem == nil || (item !== lastItem && back != lastBackCount) { entry += 1 }
+        lastItem = item
+        lastBackCount = back
+    }
+
     var state: [String: Any] {
-        [
+        refreshEntry()
+        return [
             "tab_id": id,
+            // The committed page, unlike `url`, which runs ahead while a page loads.
+            "entry": entry,
+            "entry_url": webView.backForwardList.currentItem?.url.absoluteString ?? "",
             "url": webView.url?.absoluteString ?? "",
             "title": webView.title ?? "",
             "loading": webView.isLoading,
@@ -37,6 +59,8 @@ protocol TabStoreDelegate: AnyObject {
 /// Owns every web view and reports changes in their state.
 final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     weak var delegate: TabStoreDelegate?
+    /// Given every download a page starts, before it has a destination.
+    var onDownload: ((WKDownload) -> Void)?
     private(set) var tabs: [TabID: Tab] = [:]
     private var order: [TabID] = []
     private var nextID: TabID = 1
@@ -83,6 +107,8 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
+        // Pinch on the trackpad (and smart magnify) zooms the page.
+        webView.allowsMagnification = true
         webView.isInspectable = true
         let id = tab.id
         let mark: () -> Void = { [weak self] in self?.markDirty(id) }
@@ -131,6 +157,8 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // A link with the `download` attribute, or "Download Linked File".
+        if action.shouldPerformDownload { return decisionHandler(.download) }
         guard let url = action.request.url else { return decisionHandler(.allow) }
         let scheme = url.scheme?.lowercased() ?? ""
         let internalSchemes: Set<String> = ["http", "https", "about", "file", "data", "blob", "javascript"]
@@ -149,6 +177,38 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
             return decisionHandler(.cancel)
         }
         decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        let disposition = (response.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+        let attachment = disposition.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("attachment")
+        // What WebKit cannot show, and what the server says to save, is downloaded.
+        decisionHandler(!response.canShowMIMEType || attachment ? .download : .allow)
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        began(download, in: webView)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        began(download, in: webView)
+    }
+
+    private func began(_ download: WKDownload, in webView: WKWebView) {
+        onDownload?(download)
+        // A tab opened only to fetch the file never shows a page: close it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak webView] in
+            guard let self, let webView, let tab = self.tab(for: webView),
+                  webView.backForwardList.currentItem == nil, !webView.isLoading else { return }
+            let id = tab.id
+            self.close(id)
+            self.delegate?.tabStore(self, didClose: id)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if let tab = tab(for: webView) { markDirty(tab.id) }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

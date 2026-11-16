@@ -10,6 +10,10 @@ build:
 bundle:
     ./scripts/bundle.sh
 
+# Disk image for drag-to-Applications install (build/Tilde-<version>.dmg)
+dmg:
+    ./scripts/dmg.sh
+
 # Build the app bundle and open it
 run: bundle
     open build/Tilde.app

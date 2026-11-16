@@ -1,8 +1,10 @@
 //! Browser state and behaviour. No terminal I/O happens here: keys and engine
 //! messages come in, requests go out through a `Transport`.
 
-use crate::protocol::{self, Event, Incoming, Mode, Request, Response, TabState};
+use crate::protocol::{self, Download, Event, Incoming, Mode, Request, Response, TabState};
+use crate::history::History;
 use crate::resolve::display_host;
+use crate::views::View;
 use crate::session;
 use crate::spaces::{Space, SpaceForm};
 use crate::transport::Transport;
@@ -32,8 +34,16 @@ pub struct TabEntry {
     pub pinned: bool,
     /// The address the tab had when it was pinned; "return to pinned page" goes here.
     pub pin_url: Option<String>,
+    /// The page title the tab was pinned under. It stays the tab's label
+    /// while the tab is on the pinned site, whatever page of it is showing.
+    pub pin_title: Option<String>,
     /// A name the user gave the tab; shown instead of the page title.
     pub name: Option<String>,
+    /// The address last noted in the history for this tab, so that a page is
+    /// recorded when the tab arrives at it and not again when it reloads.
+    pub recorded_url: String,
+    /// The app's `entry` number of the page `recorded_url` belongs to.
+    pub recorded_entry: Option<u64>,
 }
 
 impl TabEntry {
@@ -56,12 +66,23 @@ impl TabEntry {
     pub fn label(&self) -> String {
         if let Some(name) = &self.name {
             name.clone()
+        } else if let Some(pinned) = self.pin_title.as_ref().filter(|_| self.on_pinned_site()) {
+            pinned.clone()
         } else if !self.title.is_empty() {
             self.title.clone()
         } else if !self.url.is_empty() {
             display_host(&self.url)
         } else {
             "New tab".to_string()
+        }
+    }
+
+    /// Whether a pinned tab is still on the site it was pinned at. Hosts are
+    /// compared whole, apart from a leading `www.`.
+    pub(crate) fn on_pinned_site(&self) -> bool {
+        match &self.pin_url {
+            Some(pin) if self.pinned => display_host(pin).eq_ignore_ascii_case(&display_host(&self.url)),
+            _ => false,
         }
     }
 
@@ -83,6 +104,12 @@ impl TabEntry {
                 self.title = title.clone();
                 changed = true;
             }
+        }
+        // A tab pinned before its page had a title, or restored from an older
+        // session, takes its name from the first title seen at the pinned address.
+        if self.pinned && self.pin_title.is_none() && !self.title.is_empty() && self.pin_url.as_deref() == Some(self.url.as_str()) {
+            self.pin_title = Some(self.title.clone());
+            changed = true;
         }
         if let Some(loading) = state.loading {
             self.loading = loading;
@@ -184,6 +211,9 @@ pub(crate) enum Pending {
     Hello,
     TabList,
     Create { key: u64 },
+    DownloadList,
+    /// A failure is worth telling the user about.
+    Notify,
     Plain,
 }
 
@@ -275,6 +305,24 @@ pub struct App {
     pub form: Option<SpaceForm>,
     /// Waiting for y/n on deleting the current space.
     pub confirm_delete: bool,
+    /// The Downloads or History view, shown in place of the page.
+    pub view: Option<View>,
+    /// The selected line of the view, counting items only.
+    pub view_selected: usize,
+    /// First line of the view's list on screen.
+    pub view_scroll: usize,
+    /// Mode to go back to when the view closes.
+    pub(crate) view_return: Option<Mode>,
+    /// Waiting for y/n on clearing the whole history.
+    pub confirm_clear: bool,
+    /// Every download the app knows of, oldest first. Shared by all spaces.
+    pub downloads: Vec<Download>,
+    /// A download ended since the Downloads view was last shown.
+    pub downloads_unseen: bool,
+    /// Pages visited in every space.
+    pub history: History,
+    /// A fixed clock, for tests.
+    pub now_override: Option<u64>,
     pub session_dirty: bool,
     pub session_path: Option<PathBuf>,
 
@@ -314,6 +362,15 @@ impl App {
             space: 0,
             form: None,
             confirm_delete: false,
+            view: None,
+            view_selected: 0,
+            view_scroll: 0,
+            view_return: None,
+            confirm_clear: false,
+            downloads: Vec::new(),
+            downloads_unseen: false,
+            history: session_path.as_deref().map(|p| History::load(&crate::history::path_beside(p))).unwrap_or_default(),
+            now_override: None,
             session_dirty: false,
             session_path,
             transport,
@@ -411,6 +468,9 @@ impl App {
         }
         // Keep the selection in view after a resize, but otherwise leave
         // the sidebar where the user scrolled it.
+        if self.view.is_some() {
+            self.clamp_view();
+        }
         if self.list_height != self.layout.tab_list.height {
             self.list_height = self.layout.tab_list.height;
             self.clamp_scroll();
@@ -470,6 +530,16 @@ impl App {
                 }
                 self.instance = response.body["instance"].as_u64();
                 self.send(Request::TabList, Pending::TabList);
+                self.send(Request::DownloadList, Pending::DownloadList);
+            }
+            Pending::DownloadList => {
+                let downloads = serde_json::from_value(response.body["downloads"].clone()).unwrap_or_default();
+                self.downloads_replaced(downloads);
+            }
+            Pending::Notify => {
+                if !response.ok {
+                    self.message = response.error;
+                }
             }
             Pending::TabList => {
                 let live: Vec<TabState> = serde_json::from_value(response.body["tabs"].clone()).unwrap_or_default();
@@ -528,13 +598,17 @@ impl App {
         match event {
             Event::TabUpdated(state) => {
                 if let Some(index) = self.index_of_tab(state.tab_id) {
+                    let old_title = self.tabs[index].title.clone();
                     if self.tabs[index].apply(&state) {
                         self.session_dirty = true;
                     }
+                    self.track_visit(self.space, index, &state, &old_title);
                 } else if let Some((space, index)) = self.stashed_tab(state.tab_id) {
+                    let old_title = self.spaces[space].tabs[index].title.clone();
                     if self.spaces[space].tabs[index].apply(&state) {
                         self.session_dirty = true;
                     }
+                    self.track_visit(space, index, &state, &old_title);
                 }
             }
             Event::TabCreated { tab_id, opener_tab_id, url, background } => {
@@ -614,12 +688,33 @@ impl App {
                     self.message = None;
                 }
             }
+            Event::DownloadUpdated(download) => self.download_updated(download),
+            Event::DownloadsChanged { downloads } => self.downloads_replaced(downloads),
+            Event::OpenUrl { url } => {
+                if self.ready && !url.is_empty() {
+                    self.close_overlays();
+                    self.open_in_new_tab(url, String::new());
+                }
+            }
             Event::Command { name, arg } => self.on_command(&name, arg),
             Event::Unknown => {}
         }
     }
 
     fn on_command(&mut self, name: &str, arg: Option<i64>) {
+        if name == "copy" {
+            // The terminal has no selection of its own to copy: the text
+            // field is drawn by us, so Cmd+C copies what is in it.
+            if let Some(text) = self.edit.as_ref().map(|e| e.text.clone()).filter(|t| !t.is_empty()) {
+                self.request(Request::ClipboardSet { text });
+            }
+            return;
+        }
+        match name {
+            "downloads" => return self.toggle_view(View::Downloads),
+            "history" => return self.toggle_view(View::History),
+            _ => {}
+        }
         if self.overlay_open() && name != "help" && name != "quit" {
             // Any other command dismisses whatever is covering the page first.
             self.help_return = None;
@@ -926,10 +1021,12 @@ impl App {
         let at = if entry.pinned {
             entry.pinned = false;
             entry.pin_url = None;
+            entry.pin_title = None;
             pinned - 1 // first of the unpinned tabs
         } else {
             entry.pinned = true;
             entry.pin_url = Some(entry.url.clone());
+            entry.pin_title = Some(entry.title.clone()).filter(|t| !t.is_empty());
             pinned // last of the pinned tabs
         };
         self.tabs.insert(at, entry);
@@ -975,7 +1072,10 @@ impl App {
         self.cancel_edit();
         self.form = None;
         self.confirm_delete = false;
-        self.help_return = Some(self.mode).filter(|m| *m == Mode::Page);
+        // Over a view, the key reference returns to where the view came from.
+        self.view = None;
+        self.confirm_clear = false;
+        self.help_return = self.view_return.take().or(Some(self.mode).filter(|m| *m == Mode::Page));
         self.help = true;
         self.message = None;
         self.request(Request::FocusSet { mode: Mode::Nav });
@@ -1058,6 +1158,13 @@ impl App {
                 crate::log(&format!("cannot save session: {error}"));
             }
         }
+        if self.history.dirty {
+            if let Some(path) = self.history_file() {
+                if let Err(error) = self.history.save(&path) {
+                    crate::log(&format!("cannot save history: {error}"));
+                }
+            }
+        }
     }
 
     // ----- input -----
@@ -1069,6 +1176,8 @@ impl App {
         if self.help {
             // Any key puts the page back.
             self.close_help();
+        } else if self.view.is_some() {
+            self.handle_view_key(key);
         } else if self.form.is_some() {
             self.handle_form_key(key);
         } else if self.confirm_delete {
@@ -1102,6 +1211,8 @@ impl App {
             KeyCode::Char('P') => self.pin_home(),
             KeyCode::Char('n') => self.start_rename(),
             KeyCode::Char('?') => self.open_help(),
+            KeyCode::Char('d') => self.open_view(View::Downloads),
+            KeyCode::Char('y') => self.open_view(View::History),
             KeyCode::Char('h') | KeyCode::Left => self.step_space(-1),
             KeyCode::Char('l') | KeyCode::Right => self.step_space(1),
             KeyCode::Char('N') => self.open_space_form(false),
@@ -1179,6 +1290,19 @@ impl App {
         let layout = self.layout;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if self.help => self.close_help(),
+            // The status line's download notice leads to the downloads.
+            MouseEventKind::Down(MouseButton::Left) if contains(layout.status, col, row) && self.download_notice().is_some() && self.view != Some(View::Downloads) => {
+                self.open_view(View::Downloads)
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.view.is_some() && contains(layout.viewport, col, row) => self.click_in_view(col, row),
+            MouseEventKind::ScrollDown if self.view.is_some() && contains(layout.viewport, col, row) => {
+                self.view_selected = (self.view_selected + 3).min(usize::MAX / 2);
+                self.clamp_view();
+            }
+            MouseEventKind::ScrollUp if self.view.is_some() && contains(layout.viewport, col, row) => {
+                self.view_selected = self.view_selected.saturating_sub(3);
+                self.clamp_view();
+            }
             // The space editor and the delete question are keyboard-only.
             MouseEventKind::Down(MouseButton::Left) if self.overlay_open() => {}
             MouseEventKind::Down(MouseButton::Left) => {

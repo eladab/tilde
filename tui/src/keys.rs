@@ -18,13 +18,36 @@ pub const NAV: &[(&str, &str)] = &[
     ("N", "New space"),
     ("e", "Edit space: name, colours, art, profile"),
     ("D", "Delete space"),
+    ("y", "History, of every space"),
+    ("d", "Downloads"),
     ("?", "This key reference"),
     ("q", "Quit"),
+];
+
+/// The keys of the History view, shown along its bottom edge.
+pub const HISTORY: &[(&str, &str)] = &[
+    ("j/k", "move"),
+    ("⏎", "open in new tab"),
+    ("s", "in its space"),
+    ("x", "forget"),
+    ("C", "clear all"),
+    ("esc", "close"),
+];
+
+/// The keys of the Downloads view, shown along its bottom edge.
+pub const DOWNLOADS: &[(&str, &str)] = &[
+    ("j/k", "move"),
+    ("⏎", "open"),
+    ("f", "show in Finder"),
+    ("x", "stop or remove"),
+    ("C", "clear list"),
+    ("esc", "close"),
 ];
 
 pub const ANYWHERE: &[(&str, &str)] = &[
     ("⌘.", "Switch between tabs and page"),
     ("⌘L", "Edit the address"),
+    ("⌘C", "Copy the address while editing it"),
     ("⌘T", "New tab"),
     ("⌘W", "Close tab"),
     ("⌘R", "Reload"),
@@ -34,9 +57,14 @@ pub const ANYWHERE: &[(&str, &str)] = &[
     ("⌘D", "Pin or unpin tab"),
     ("⌘⇧H", "Return to the pinned page"),
     ("⌘B", "Show or hide the sidebar"),
+    ("⌘+ / ⌘-", "Zoom the page in / out"),
+    ("⌘0", "Actual size"),
+    ("Pinch", "Zoom the page on the trackpad"),
     ("⌥⌘← / ⌥⌘→", "Previous / next space"),
     ("⌘⇧N", "New space"),
     ("⌃1 … ⌃9", "Select space"),
+    ("⌘Y", "History"),
+    ("⌥⌘L", "Downloads"),
     ("⌘/", "This key reference"),
     ("⌘-click", "Open link in a background tab"),
     ("⌘Q", "Quit"),

@@ -26,6 +26,7 @@ WORK = tempfile.mkdtemp(prefix="e", dir=os.environ.get("TILDE_E2E_TMP", "/tmp"))
 APP = os.path.join(WORK, "TildeE2E.app")
 BACKGROUND = "--background" in sys.argv
 DEBUG_SOCK = os.path.join(WORK, "d.sock")
+DOWNLOADS = os.path.join(WORK, "downloads")
 SESSION = os.path.join(WORK, "session.json")
 failures = []
 app_pid = None  # the instance this script started; nothing else is ever signalled
@@ -39,6 +40,9 @@ def prepare_app():
     for key, value in [("CFBundleIdentifier", "dev.tilde.Tilde.e2e"), ("CFBundleName", "TildeE2E"),
                        ("CFBundleDisplayName", "TildeE2E"), ("CFBundleExecutable", "TildeE2E")]:
         subprocess.run(["plutil", "-replace", key, "-string", value, plist], check=True)
+    # The copy must not offer itself to macOS as a browser.
+    for key in ["CFBundleURLTypes", "CFBundleDocumentTypes"]:
+        subprocess.run(["plutil", "-remove", key, plist], check=True)
     os.rename(os.path.join(APP, "Contents/MacOS/Tilde"), os.path.join(APP, "Contents/MacOS/TildeE2E"))
     subprocess.run(["codesign", "--force", "--sign", "-", APP], check=True, capture_output=True)
 
@@ -103,7 +107,8 @@ def launch():
     global app_pid, tui_pid
     if os.path.exists(DEBUG_SOCK):
         os.remove(DEBUG_SOCK)
-    command = ["open", "-n", APP, "--env", f"TILDE_DEBUG_SOCKET={DEBUG_SOCK}", "--env", f"TILDE_SESSION={SESSION}"]
+    command = ["open", "-n", APP, "--env", f"TILDE_DEBUG_SOCKET={DEBUG_SOCK}", "--env", f"TILDE_SESSION={SESSION}",
+               "--env", f"TILDE_DOWNLOADS={DOWNLOADS}"]
     if BACKGROUND:
         command[1:1] = ["-g"]
         command += ["--env", "TILDE_BACKGROUND=1"]
@@ -342,6 +347,79 @@ def main():
     s = wait(d, lambda s: s["viewport"]["col"] == 28, "Cmd+B shows the sidebar")
     time.sleep(0.3)
     check("Cmd+B shows it again", frame_matches_cells(state(d)))
+
+    # Copying the address out of the URL field
+    key(d, "l", "cmd", 37); wait(d, lambda s: s["mode"] == "nav", "NAV")
+    editing = active(state(d))["url"]
+    key(d, "c", "cmd", 8); time.sleep(0.3)
+    check("Cmd+L then Cmd+C copies the address", subprocess.run(["pbpaste"], capture_output=True, text=True).stdout == editing)
+    typ(d, "\x1b"); typ(d, "\r"); wait(d, lambda s: s["mode"] == "page", "PAGE")
+
+    # A download: a link with the download attribute, clicked by the page itself
+    js(d, "var a = document.createElement('a'); a.href = 'data:application/octet-stream;base64,aGVsbG8gdGlsZGU='; "
+          "a.download = 'tilde-e2e.txt'; document.body.appendChild(a); a.click(); 1")
+    s = wait(d, lambda s: any(x["state"] == "done" for x in s["downloads"]), "download finished")
+    saved = os.path.join(DOWNLOADS, "tilde-e2e.txt")
+    check("a download is saved and listed",
+          os.path.exists(saved) and open(saved).read() == "hello tilde" and s["downloads"][0]["filename"] == "tilde-e2e.txt"
+          and s["downloads"][0]["received"] == 11)
+    tabs = len(s["tabs"])
+    key(d, "l", "cmd+alt", 37)
+    wait(d, lambda s: s["mode"] == "nav" and s.get("web_hidden") is True, "Opt+Cmd+L shows the downloads")
+    typ(d, "x")
+    wait(d, lambda s: not s["downloads"], "x takes the download off the list")
+    check("removing a download from the list keeps the file", os.path.exists(saved))
+    key(d, "l", "cmd+alt", 37)
+    wait(d, lambda s: s["mode"] == "page" and s.get("web_hidden") is False, "Opt+Cmd+L closes the downloads")
+
+    # A search is one visit, however often the results page rewrites its address
+    key(d, "l", "cmd", 37); wait(d, lambda s: s["mode"] == "nav", "NAV")
+    typ(d, "tilde e2e search"); typ(d, "\r")
+    wait(d, lambda s: "duckduckgo.com" in active(s)["url"] and not active(s)["loading"] and s["mode"] == "page", "search results")
+    time.sleep(3)
+    searches = [v["url"] for v in json.load(open(os.path.join(WORK, "history.json"))) if "duckduckgo.com" in v["url"]]
+    # One line for this search and one for the search made earlier in this run.
+    check("a search from the address bar is one line of history",
+          sum("tilde+e2e+search" in u for u in searches) == 1 and len(searches) == len({u.split("&")[0] for u in searches}), str(searches))
+    key(d, "[", "cmd", 33)
+    wait(d, lambda s: "duckduckgo.com" not in active(s)["url"], "back from the search")
+
+    # History: the view opens a visited page in a new tab
+    key(d, "y", "cmd", 16)
+    wait(d, lambda s: s["mode"] == "nav" and s.get("web_hidden") is True, "Cmd+Y shows the history")
+    history = json.load(open(os.path.join(WORK, "history.json"))) if os.path.exists(os.path.join(WORK, "history.json")) else []
+    typ(d, "\r")
+    s = wait(d, lambda s: len(s["tabs"]) == tabs + 1 and s["mode"] == "page", "a page opened from the history")
+    check("history records visits and opens one in a new tab",
+          len(history) >= 2 and all(v.get("space") == "Home" for v in history) and active(s)["url"] == history[-1]["url"])
+    key(d, "w", "cmd", 13)
+    wait(d, lambda s: len(s["tabs"]) == tabs, "the history tab closed")
+    typ(d, "\r"); wait(d, lambda s: s["mode"] == "page", "PAGE")
+
+    # A link clicked in another app opens in a new tab and shows it
+    tabs = len(state(d)["tabs"])
+    d.call("debug.open_url", url="https://example.org/?from=another-app")
+    s = wait(d, lambda s: len(s["tabs"]) == tabs + 1 and "from=another-app" in active(s)["url"] and s["mode"] == "page",
+             "a link from another app")
+    check("a link from another app opens in a new tab", frame_matches_cells(s) and s.get("web_hidden") is False)
+    key(d, "w", "cmd", 13)
+    wait(d, lambda s: len(s["tabs"]) == tabs, "the link's tab closed")
+    typ(d, "\r"); wait(d, lambda s: s["mode"] == "page", "PAGE")
+
+    # Page zoom
+    check("pinch to zoom is enabled on the page", state(d).get("allows_magnification") is True)
+    key(d, "=", "cmd", 24)
+    wait(d, lambda s: s["page_zoom"] > 1, "Cmd+= zooms in")
+    key(d, "+", "cmd+shift", 24)
+    larger = wait(d, lambda s: s["page_zoom"] > 1.2, "Cmd+Plus zooms in")["page_zoom"]
+    key(d, "-", "cmd", 27)
+    wait(d, lambda s: 1 < s["page_zoom"] < larger, "Cmd+Minus zooms out")
+    key(d, "-", "cmd", 27); key(d, "-", "cmd", 27)
+    wait(d, lambda s: s["page_zoom"] < 1, "Cmd+Minus zooms below actual size")
+    key(d, "0", "cmd", 29)
+    s = wait(d, lambda s: s["page_zoom"] == 1 and s["magnification"] == 1, "Cmd+0 restores actual size")
+    check("Cmd+Plus, Cmd+Minus and Cmd+0 zoom the page and leave it in place",
+          frame_matches_cells(s) and s["mode"] == "page")
 
     # Pin, browse away, return to the pinned page
     key(d, "1", "cmd", 18)

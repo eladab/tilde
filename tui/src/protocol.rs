@@ -50,6 +50,25 @@ pub enum Request {
     TabStop { tab_id: u64 },
     #[serde(rename = "focus.set")]
     FocusSet { mode: Mode },
+    #[serde(rename = "download.list")]
+    DownloadList,
+    /// Open the downloaded file.
+    #[serde(rename = "download.open")]
+    DownloadOpen { download_id: u64 },
+    /// Show the downloaded file in the Finder.
+    #[serde(rename = "download.reveal")]
+    DownloadReveal { download_id: u64 },
+    #[serde(rename = "download.cancel")]
+    DownloadCancel { download_id: u64 },
+    /// Take a download off the list, stopping it first if it is running.
+    #[serde(rename = "download.remove")]
+    DownloadRemove { download_id: u64 },
+    /// Take every download that is not running off the list.
+    #[serde(rename = "download.clear")]
+    DownloadClear,
+    /// Put text on the system clipboard.
+    #[serde(rename = "clipboard.set")]
+    ClipboardSet { text: String },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -74,6 +93,42 @@ pub struct TabState {
     pub progress: Option<f64>,
     pub can_go_back: Option<bool>,
     pub can_go_forward: Option<bool>,
+    /// A number that changes when the tab arrives at another page, and stays
+    /// when the page it is on is replaced (a redirect, a rewritten address).
+    /// Zero until the first page has arrived.
+    pub entry: Option<u64>,
+    /// The address of the page the tab is on; `url` runs ahead while loading.
+    pub entry_url: Option<String>,
+}
+
+/// A download, running or past, as the app reports it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Download {
+    pub download_id: u64,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub path: String,
+    /// `active`, `done`, `failed` or `cancelled`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub received: u64,
+    /// Zero while the size is not known.
+    #[serde(default)]
+    pub total: u64,
+    /// Seconds since 1970.
+    #[serde(default)]
+    pub started: u64,
+    pub error: Option<String>,
+}
+
+impl Download {
+    pub fn is_active(&self) -> bool {
+        self.state == "active"
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -96,6 +151,15 @@ pub enum Event {
     TabCrashed { tab_id: u64 },
     #[serde(rename = "focus.changed")]
     FocusChanged { mode: Mode },
+    /// One download started, progressed or ended.
+    #[serde(rename = "download.updated")]
+    DownloadUpdated(Download),
+    /// Downloads were taken off the list; this is the whole list, oldest first.
+    #[serde(rename = "downloads.changed")]
+    DownloadsChanged { downloads: Vec<Download> },
+    /// Another app asked for an address to be opened (a clicked link).
+    #[serde(rename = "open-url")]
+    OpenUrl { url: String },
     #[serde(rename = "command")]
     Command { name: String, arg: Option<i64> },
     #[serde(other)]
