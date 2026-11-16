@@ -2,7 +2,7 @@ import Foundation
 
 enum Log {
     private static let handle: FileHandle? = {
-        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/weft")
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/tilde")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("app.log")
         if !FileManager.default.fileExists(atPath: url.path) {

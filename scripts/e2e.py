@@ -1,23 +1,61 @@
 #!/usr/bin/env python3
-"""End-to-end acceptance checks for Weft.
+"""End-to-end acceptance checks for Tilde.
 
-Launches build/Weft.app with a throwaway session and drives it through the
-debug socket (enabled only by WEFT_DEBUG_SOCKET): typing into the TUI,
+Launches build/Tilde.app with a throwaway session and drives it through the
+debug socket (enabled only by TILDE_DEBUG_SOCKET): typing into the TUI,
 synthesised key presses and clicks, and JavaScript probes in the page.
 
-Needs network access. Opens a real window and takes keyboard focus while it
-runs (about a minute). Run `scripts/bundle.sh` first.
+The app under test is a private copy of the bundle with its own bundle
+identifier, so it has its own WebKit data and never touches the logins or site
+data of the real Tilde, and it can run while the real Tilde is open. Only the
+processes this script starts are ever signalled.
 
-    python3 scripts/e2e.py
+Needs network access and takes about a minute and a half. Run
+`scripts/bundle.sh` first.
+
+    python3 scripts/e2e.py                # takes keyboard focus while it runs
+    python3 scripts/e2e.py --background   # stays behind your windows; skips the
+                                          # checks that need real focus (clicks)
 """
 import json, os, signal, socket, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP = os.path.join(ROOT, "build/Weft.app")
-WORK = tempfile.mkdtemp(prefix="weft-e2e-", dir="/tmp")
-DEBUG_SOCK = os.path.join(WORK, "debug.sock")
+SOURCE_APP = os.path.join(ROOT, "build/Tilde.app")
+# Kept short: Unix socket paths are limited to about 100 characters.
+WORK = tempfile.mkdtemp(prefix="e", dir=os.environ.get("TILDE_E2E_TMP", "/tmp"))
+APP = os.path.join(WORK, "TildeE2E.app")
+BACKGROUND = "--background" in sys.argv
+DEBUG_SOCK = os.path.join(WORK, "d.sock")
 SESSION = os.path.join(WORK, "session.json")
 failures = []
+app_pid = None  # the instance this script started; nothing else is ever signalled
+skipped = []
+
+
+def prepare_app():
+    """Copies the bundle and gives the copy its own identity."""
+    subprocess.run(["cp", "-R", SOURCE_APP, APP], check=True)
+    plist = os.path.join(APP, "Contents/Info.plist")
+    for key, value in [("CFBundleIdentifier", "dev.tilde.Tilde.e2e"), ("CFBundleName", "TildeE2E"),
+                       ("CFBundleDisplayName", "TildeE2E"), ("CFBundleExecutable", "TildeE2E")]:
+        subprocess.run(["plutil", "-replace", key, "-string", value, plist], check=True)
+    os.rename(os.path.join(APP, "Contents/MacOS/Tilde"), os.path.join(APP, "Contents/MacOS/TildeE2E"))
+    subprocess.run(["codesign", "--force", "--sign", "-", APP], check=True, capture_output=True)
+
+
+def alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def skip(name, why):
+    print("SKIP  " + name + "   [" + why + "]")
+    skipped.append(name)
 
 
 class Debug:
@@ -44,8 +82,12 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
+tui_pid = None
+
+
 def processes():
-    return subprocess.run(["pgrep", "-x", "Weft|weft-tui"], capture_output=True, text=True).stdout.split()
+    """The app and TUI processes of this run that are still alive."""
+    return [pid for pid in (app_pid, tui_pid) if alive(pid)]
 
 
 def wait_gone(timeout=10):
@@ -58,9 +100,14 @@ def wait_gone(timeout=10):
 
 
 def launch():
+    global app_pid, tui_pid
     if os.path.exists(DEBUG_SOCK):
         os.remove(DEBUG_SOCK)
-    subprocess.run(["open", APP, "--env", f"WEFT_DEBUG_SOCKET={DEBUG_SOCK}", "--env", f"WEFT_SESSION={SESSION}"], check=True)
+    command = ["open", "-n", APP, "--env", f"TILDE_DEBUG_SOCKET={DEBUG_SOCK}", "--env", f"TILDE_SESSION={SESSION}"]
+    if BACKGROUND:
+        command[1:1] = ["-g"]
+        command += ["--env", "TILDE_BACKGROUND=1"]
+    subprocess.run(command, check=True)
     end = time.time() + 15
     while not os.path.exists(DEBUG_SOCK):
         if time.time() > end:
@@ -68,12 +115,23 @@ def launch():
         time.sleep(0.1)
     time.sleep(0.3)
     d = Debug(DEBUG_SOCK)
+    end = time.time() + 10
+    while True:
+        s = d.call("debug.state")
+        if s.get("tui_pid"):
+            app_pid, tui_pid = s["pid"], s["tui_pid"]
+            break
+        if time.time() > end:
+            sys.exit("the app did not start its TUI")
+        time.sleep(0.2)
+    if BACKGROUND:
+        return d
     # Synthesised clicks only reach the views of the active app, and an app
     # opened from a background process is not always activated.
     end = time.time() + 10
     while not d.call("debug.state").get("app_active"):
         if time.time() > end:
-            sys.exit("could not bring Weft to the front (is the screen locked or asleep?)")
+            sys.exit("could not bring Tilde to the front (is the screen locked or asleep?)")
         d.call("debug.activate")
         time.sleep(0.3)
     return d
@@ -139,8 +197,28 @@ def session():
         return json.load(f)
 
 
-def session_tabs(s):
-    return [(t["url"], t["title"]) for t in s["tabs"]]
+def cur(j):
+    """The space that was showing when the session was written."""
+    return j["spaces"][j.get("current", 0)]
+
+
+def session_tabs(j):
+    return [(space["name"], space["profile"], space.get("color", 0),
+             [(t["url"], t["title"], t.get("pinned", False), t.get("name")) for t in space["tabs"]])
+            for space in j["spaces"]]
+
+
+def wait_session(predicate, what, timeout=10):
+    """The TUI writes the session a moment after each change."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if predicate(session()):
+                return session()
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
+        time.sleep(0.2)
+    sys.exit("TIMEOUT waiting for session: " + what)
 
 
 def open_tab(d, text):
@@ -151,10 +229,12 @@ def open_tab(d, text):
 
 
 def main():
-    if not os.path.isdir(APP):
-        sys.exit("build/Weft.app not found: run scripts/bundle.sh first")
-    if processes():
-        sys.exit("Weft is already running; quit it first")
+    global tui_pid
+    if len(DEBUG_SOCK) > 100:
+        sys.exit("temporary directory path too long for a Unix socket: " + WORK)
+    if not os.path.isdir(SOURCE_APP):
+        sys.exit("build/Tilde.app not found: run scripts/bundle.sh first")
+    prepare_app()
 
     d = launch()
     s = wait(d, lambda s: s.get("active") and not active(s)["loading"], "home page")
@@ -179,10 +259,14 @@ def main():
     check("Cmd+. returns to NAV", "Terminal" in s["first_responder"])
     typ(d, "\r")
     wait(d, lambda s: s["mode"] == "page", "PAGE after Enter")
-    d.call("debug.click", target="cell", col=10, row=20); time.sleep(0.6)
-    check("clicking the TUI reports NAV", state(d)["mode"] == "nav")
-    d.call("debug.click", target="page", x=400, y=500); time.sleep(0.6)
-    check("clicking the page reports PAGE", state(d)["mode"] == "page")
+    if BACKGROUND:
+        skip("clicking the TUI reports NAV", "needs focus")
+        skip("clicking the page reports PAGE", "needs focus")
+    else:
+        d.call("debug.click", target="cell", col=10, row=20); time.sleep(0.6)
+        check("clicking the TUI reports NAV", state(d)["mode"] == "nav")
+        d.call("debug.click", target="page", x=400, y=500); time.sleep(0.6)
+        check("clicking the page reports PAGE", state(d)["mode"] == "page")
     nav(d)
 
     # target=_blank, tab cycling, typing into a page
@@ -191,22 +275,35 @@ def main():
     typ(d, "\r")
     wait(d, lambda s: active(s)["title"] == "form" and s["mode"] == "page", "form page")
     count = len(state(d)["tabs"])
-    rect = json.loads(js(d, "JSON.stringify(document.getElementById('a').getBoundingClientRect())"))
-    d.call("debug.click", target="page", x=int(rect["x"] + 30), y=int(rect["y"] + rect["height"] / 2))
-    wait(d, lambda s: len(s["tabs"]) == count + 1 and "example.org" in active(s)["url"], "target=_blank tab")
-    check("a target=_blank link opens and shows a new tab", True)
-    key(d, "\x19", "ctrl+shift", 48)
-    wait(d, lambda s: active(s)["title"] == "form", "Ctrl+Shift+Tab")
-    key(d, "\t", "ctrl", 48)
-    wait(d, lambda s: "example.org" in active(s)["url"], "Ctrl+Tab")
+    if BACKGROUND:
+        skip("a target=_blank link opens and shows a new tab", "needs focus")
+        open_tab(d, "example.org")
+    else:
+        rect = json.loads(js(d, "JSON.stringify(document.getElementById('a').getBoundingClientRect())"))
+        d.call("debug.click", target="page", x=int(rect["x"] + 30), y=int(rect["y"] + rect["height"] / 2))
+    wait(d, lambda s: len(s["tabs"]) == count + 1 and "example.org" in active(s)["url"] and s["mode"] == "page", "example.org tab")
+    if not BACKGROUND:
+        check("a target=_blank link opens and shows a new tab", True)
+    if BACKGROUND:
+        # Without a key window AppKit only delivers menu shortcuts.
+        skip("Ctrl+Tab and Ctrl+Shift+Tab switch tabs from the page", "needs focus")
+    else:
+        key(d, "\x19", "ctrl+shift", 48)
+        wait(d, lambda s: active(s)["title"] == "form", "Ctrl+Shift+Tab")
+        key(d, "\t", "ctrl", 48)
+        wait(d, lambda s: "example.org" in active(s)["url"], "Ctrl+Tab")
+        check("Ctrl+Tab and Ctrl+Shift+Tab switch tabs from the page", state(d)["mode"] == "page")
     key(d, "1", "cmd", 18)
     wait(d, lambda s: "webkit.org" in active(s)["url"], "Cmd+1")
     key(d, "2", "cmd", 19)
     wait(d, lambda s: active(s)["title"] == "form", "Cmd+2")
-    check("Ctrl+Tab, Ctrl+Shift+Tab and Cmd+digit switch tabs from the page", state(d)["mode"] == "page")
-    js(d, "document.getElementById('i').focus()")
-    key(d, "h", "", 4); key(d, "i", "", 34)
-    check("typing reaches a text field in the page", js(d, "document.getElementById('i').value") == "hi")
+    check("Cmd+digit switches tabs from the page", state(d)["mode"] == "page")
+    if BACKGROUND:
+        skip("typing reaches a text field in the page", "needs focus")
+    else:
+        js(d, "document.getElementById('i').focus()")
+        key(d, "h", "", 4); key(d, "i", "", 34)
+        check("typing reaches a text field in the page", js(d, "document.getElementById('i').value") == "hi")
 
     # A page that swallows every key cannot block browser shortcuts
     key(d, "l", "cmd", 37); wait(d, lambda s: s["mode"] == "nav", "NAV")
@@ -234,14 +331,89 @@ def main():
     check("a page calling focus() cannot leave NAV mode", state(d)["mode"] == "nav")
     typ(d, "x"); time.sleep(0.3)
 
+    # Sidebar toggle
+    typ(d, "\r"); wait(d, lambda s: s["mode"] == "page", "PAGE")
+    key(d, "b", "cmd", 11)
+    s = wait(d, lambda s: s["viewport"]["col"] == 0, "Cmd+B hides the sidebar")
+    time.sleep(0.3); s = state(d)
+    check("Cmd+B hides the sidebar and the page takes the full width",
+          frame_matches_cells(s) and s["web_frame"]["x"] == 0 and s["viewport"]["cols"] == s["grid"]["cols"] and s["mode"] == "page")
+    key(d, "b", "cmd", 11)
+    s = wait(d, lambda s: s["viewport"]["col"] == 28, "Cmd+B shows the sidebar")
+    time.sleep(0.3)
+    check("Cmd+B shows it again", frame_matches_cells(state(d)))
+
+    # Pin, browse away, return to the pinned page
+    key(d, "1", "cmd", 18)
+    s = wait(d, lambda s: "webkit.org" in active(s)["url"], "first tab")
+    pinned_url = active(s)["url"]
+    key(d, "d", "cmd", 2)
+    saved = wait_session(lambda j: cur(j)["tabs"][0].get("pinned") and cur(j)["tabs"][0].get("pin_url") == pinned_url, "pin saved")
+    check("Cmd+D pins the tab and the pin is saved", sum(1 for t in cur(saved)["tabs"] if t.get("pinned")) == 1)
+    key(d, "l", "cmd", 37); wait(d, lambda s: s["mode"] == "nav", "NAV")
+    typ(d, "example.com/elsewhere"); typ(d, "\r")
+    wait(d, lambda s: "example.com/elsewhere" in active(s)["url"] and s["mode"] == "page", "browsed away from the pin")
+    key(d, "H", "cmd+shift", 4)
+    wait(d, lambda s: active(s)["url"] == pinned_url, "Cmd+Shift+H")
+    check("Cmd+Shift+H returns a pinned tab to its pinned page", state(d)["mode"] == "page")
+
+    # Rename
+    nav(d)
+    typ(d, "n"); typ(d, "Docs"); typ(d, "\r")
+    wait_session(lambda j: cur(j)["tabs"][0].get("name") == "Docs", "name saved")
+    check("n renames a tab and the name is saved", True)
+
+    # Key reference
+    typ(d, "\r"); wait(d, lambda s: s["mode"] == "page", "PAGE")
+    key(d, "/", "cmd", 44)
+    wait(d, lambda s: s.get("web_hidden") is True and s["mode"] == "nav", "Cmd+/ shows the key reference")
+    typ(d, " ")
+    s = wait(d, lambda s: s.get("web_hidden") is False and s["mode"] == "page", "a key closes the key reference")
+    check("Cmd+/ shows the key reference; a key returns to the page", active(s)["url"] == pinned_url)
+    nav(d)
+    typ(d, "?")
+    wait(d, lambda s: s.get("web_hidden") is True, "? shows the key reference")
+    typ(d, "q")
+    s = wait(d, lambda s: s.get("web_hidden") is False, "a key closes it")
+    check("? works in NAV mode, and the closing key is not acted on", s["tui_running"] and s["mode"] == "nav")
+
+    # Spaces: own tabs, own profile
+    js(d, "localStorage.setItem('tilde-e2e', 'home'); 1")
+    home_tabs = len(state(d)["tabs"])
+    typ(d, "N")
+    wait(d, lambda s: s.get("web_hidden") is True, "space editor")
+    typ(d, "E2E Space"); typ(d, "\t"); typ(d, "\x1b[C"); typ(d, "\r")
+    saved = wait_session(lambda j: len(j["spaces"]) == 2 and j.get("current") == 1, "new space saved")
+    check("N creates a space with its own profile and the chosen colour",
+          (saved["spaces"][1]["name"], saved["spaces"][1]["profile"], saved["spaces"][1]["color"]) == ("E2E Space", "e2e-space", 2), str(saved["spaces"][1]))
+    typ(d, pinned_url); typ(d, "\r")
+    s = wait(d, lambda s: active(s)["url"] == pinned_url and s["mode"] == "page" and not active(s)["loading"], "same site in the new space")
+    space_tab = s["active"]
+    check("the other space's tabs stay loaded", len(s["tabs"]) == home_tabs + 1)
+    check("a space with its own profile does not see the first space's site data",
+          js(d, "localStorage.getItem('tilde-e2e')") != "home")
+    js(d, "localStorage.setItem('tilde-e2e', 'space'); window.__mark = 'space page'; 1")
+    key(d, "\uf702", "cmd+alt", 123)
+    s = wait(d, lambda s: s["active"] != space_tab and active(s)["url"] == pinned_url, "Opt+Cmd+Left")
+    check("Opt+Cmd+Left switches space and stays in PAGE", s["mode"] == "page" and js(d, "localStorage.getItem('tilde-e2e')") == "home")
+    key(d, "2", "ctrl", 19)
+    wait(d, lambda s: s["active"] == space_tab, "Ctrl+2")
+    check("Ctrl+2 returns to the space without reloading its page",
+          js(d, "window.__mark") == "space page" and js(d, "localStorage.getItem('tilde-e2e')") == "space")
+    js(d, "localStorage.removeItem('tilde-e2e'); 1")
+    key(d, "\uf703", "cmd+alt", 124)
+    wait(d, lambda s: s["active"] != space_tab, "Opt+Cmd+Right")
+    js(d, "localStorage.removeItem('tilde-e2e'); 1")
+    wait_session(lambda j: j.get("current", 0) == 0, "back in the first space")
+
     # Ten tabs, no reload when switching
     nav(d)
-    have = len(state(d)["tabs"])
-    sites = ["example.net", "apple.com", "wikipedia.org", "nonexistent-host-weft-test.invalid", "swift.org", "rust-lang.org", "duckduckgo.com", "example.com", "example.org"]
+    have = len(state(d)["tabs"]) - 1  # not counting the other space's tab
+    sites = ["example.net", "apple.com", "wikipedia.org", "nonexistent-host-tilde-test.invalid", "swift.org", "rust-lang.org", "duckduckgo.com", "example.com", "example.org"]
     for site in sites[: 10 - have]:
         open_tab(d, site)
         wait(d, lambda s: s["mode"] == "page", "PAGE after opening " + site)
-    s = wait(d, lambda s: len(s["tabs"]) == 10 and all(not t["loading"] for t in s["tabs"]), "ten tabs loaded", 90)
+    s = wait(d, lambda s: len(s["tabs"]) == 11 and all(not t["loading"] for t in s["tabs"]), "ten tabs loaded", 90)
     failed = [t for t in s["tabs"] if "nonexistent-host" in t["url"]]
     check("a failed load keeps the address it failed on", len(failed) == 1 and failed[0]["title"] == "Can't open page")
     nav(d)
@@ -273,12 +445,13 @@ def main():
     tabs_before = [(t["tab_id"], t["url"]) for t in state(d)["tabs"]]
     active_before = state(d)["active"]
     js(d, "window.__mark = 'survivor'; 1")
-    os.kill(int(subprocess.check_output(["pgrep", "-x", "weft-tui"]).split()[0]), signal.SIGKILL)
+    os.kill(state(d)["tui_pid"], signal.SIGKILL)
     s = wait(d, lambda s: s["awaiting_restart"] and not s["tui_running"], "restart prompt")
-    check("kill -9 of weft-tui shows the restart prompt and hides the page", s["web_hidden"] is True)
+    check("kill -9 of tilde-tui shows the restart prompt and hides the page", s["web_hidden"] is True)
     typ(d, " ")
     wait(d, lambda s: s["tui_running"] and s["tui_connected"] and s.get("web_hidden") is False, "TUI restarted")
     time.sleep(1)
+    tui_pid = state(d)["tui_pid"]
     s = state(d)
     check("after restart the same tabs are present, not recreated",
           [(t["tab_id"], t["url"]) for t in s["tabs"]] == tabs_before and s["active"] == active_before)
@@ -307,22 +480,33 @@ def main():
     time.sleep(1)
     typ(d, "\r"); wait(d, lambda s: s["mode"] == "page", "PAGE")
     key(d, "q", "cmd", 12)
-    check("Cmd+Q leaves no Weft or weft-tui process", wait_gone(), str(processes()))
+    check("Cmd+Q leaves no Tilde or tilde-tui process", wait_gone(), str(processes()))
     before = session()
-    check("the session has ten tabs", len(before["tabs"]) == 10)
+    check("the session has ten tabs in the first space and one in the second",
+          [len(space["tabs"]) for space in before["spaces"]] == [10, 1] and before.get("current", 0) == 0)
 
     d = launch()
     s = wait(d, lambda s: s.get("active") and s["tui_connected"] and active(s)["url"], "relaunch")
     time.sleep(1.5)
     s, after = state(d), session()
-    check("relaunch restores tabs and order", session_tabs(before) == session_tabs(after))
+    check("relaunch restores spaces, tabs and order", session_tabs(before) == session_tabs(after))
     check("relaunch restores the active tab",
-          before["active"] == after["active"] and active(s)["url"] == before["tabs"][before["active"]]["url"])
+          cur(before)["active"] == cur(after)["active"] and active(s)["url"] == cur(before)["tabs"][cur(before)["active"]]["url"])
     check("only the active tab is loaded at launch", len(s["tabs"]) == 1)
+    first = cur(after)["tabs"][0]
+    check("the pin and its name survive the relaunch",
+          first.get("pinned") is True and first.get("name") == "Docs" and "webkit.org" in first.get("pin_url", ""))
+    typ(d, "l")
+    s = wait(d, lambda s: len(s["tabs"]) == 2, "second space loads its tab on first visit")
+    typ(d, "D"); wait(d, lambda s: s.get("web_hidden") is True, "delete question"); typ(d, "y")
+    wait(d, lambda s: len(s["tabs"]) == 1, "the deleted space's tab is closed")
+    check("D then y deletes a space and closes its tabs", len(wait_session(lambda j: len(j["spaces"]) == 1, "one space left")["spaces"]) == 1)
     typ(d, "q")
     check("q quits everything", wait_gone(), str(processes()))
 
     print()
+    if skipped:
+        print(f"{len(skipped)} skipped (run without --background to include them)")
     if failures:
         print(f"{len(failures)} FAILED: " + "; ".join(failures))
         sys.exit(1)
@@ -333,4 +517,12 @@ if __name__ == "__main__":
     try:
         main()
     finally:
-        subprocess.run(["pkill", "-x", "Weft"], capture_output=True)
+        # Only this run's own app; a Tilde the user has open is never touched.
+        if alive(app_pid):
+            os.kill(app_pid, signal.SIGTERM)
+        subprocess.run(["rm", "-rf", WORK], capture_output=True)
+        # The private copy's own site data, cookies and caches.
+        library = os.path.expanduser("~/Library")
+        for leftover in ["WebKit/dev.tilde.Tilde.e2e", "Caches/dev.tilde.Tilde.e2e",
+                         "HTTPStorages/dev.tilde.Tilde.e2e", "HTTPStorages/dev.tilde.Tilde.e2e.binarycookies"]:
+            subprocess.run(["rm", "-rf", os.path.join(library, leftover)], capture_output=True)

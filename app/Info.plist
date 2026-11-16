@@ -3,13 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Weft</string>
+    <string>Tilde</string>
     <key>CFBundleDisplayName</key>
-    <string>Weft</string>
+    <string>Tilde</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.weft.Weft</string>
+    <string>dev.tilde.Tilde</string>
     <key>CFBundleExecutable</key>
-    <string>Weft</string>
+    <string>Tilde</string>
+    <key>CFBundleIconFile</key>
+    <string>Tilde</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

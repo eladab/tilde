@@ -17,6 +17,8 @@ protocol TerminalHost: AnyObject {
     /// Current grid size in cells.
     var gridSize: (cols: Int, rows: Int) { get }
     var isProcessRunning: Bool { get }
+    /// Process ID of the running child, if any.
+    var processID: Int32? { get }
 
     /// Called on the main queue when the child exits. `nil` means killed by a signal.
     var onExit: ((Int32?) -> Void)? { get set }
@@ -35,7 +37,7 @@ protocol TerminalHost: AnyObject {
     func type(_ text: String)
 }
 
-private final class WeftTerminalView: LocalProcessTerminalView {
+private final class TildeTerminalView: LocalProcessTerminalView {
     var inputWhileStopped: (() -> Void)?
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
@@ -48,7 +50,7 @@ private final class WeftTerminalView: LocalProcessTerminalView {
 }
 
 final class SwiftTermHost: NSObject, TerminalHost, LocalProcessTerminalViewDelegate {
-    private let term: WeftTerminalView
+    private let term: TildeTerminalView
     private lazy var probe = Terminal(delegate: term)
 
     var onExit: ((Int32?) -> Void)?
@@ -60,7 +62,7 @@ final class SwiftTermHost: NSObject, TerminalHost, LocalProcessTerminalViewDeleg
     var view: NSView { term }
 
     init(font: NSFont) {
-        term = WeftTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        term = TildeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
         term.font = font
         term.nativeBackgroundColor = NSColor(srgbRed: 0.09, green: 0.09, blue: 0.11, alpha: 1)
@@ -85,6 +87,8 @@ final class SwiftTermHost: NSObject, TerminalHost, LocalProcessTerminalViewDeleg
     }
 
     var isProcessRunning: Bool { term.process?.running == true }
+
+    var processID: Int32? { isProcessRunning ? term.process?.shellPid : nil }
 
     func frame(for cells: CellRect) -> NSRect {
         let cell = cellSize

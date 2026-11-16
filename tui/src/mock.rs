@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 
 struct MockTab {
     id: u64,
+    #[cfg_attr(not(test), allow(dead_code))]
+    profile: String,
     history: Vec<String>,
     index: usize,
 }
@@ -64,12 +66,17 @@ impl MockEngine {
         self.tabs.iter().find(|t| t.id == id).map(|t| t.url().to_string())
     }
 
+    #[cfg(test)]
+    pub fn profile_of(&self, id: u64) -> Option<String> {
+        self.tabs.iter().find(|t| t.id == id).map(|t| t.profile.clone())
+    }
+
     /// Adds a tab as if the app already had it loaded (for re-adoption tests).
     #[cfg(test)]
     pub fn preload(&mut self, url: &str) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.tabs.push(MockTab { id, history: vec![url.to_string()], index: 0 });
+        self.tabs.push(MockTab { id, profile: "default".into(), history: vec![url.to_string()], index: 0 });
         id
     }
 
@@ -122,7 +129,8 @@ impl MockEngine {
                 };
                 let tab_id = self.next_id;
                 self.next_id += 1;
-                let mut tab = MockTab { id: tab_id, history: vec![], index: 0 };
+                let profile = req["profile"].as_str().unwrap_or("default").to_string();
+                let mut tab = MockTab { id: tab_id, profile, history: vec![], index: 0 };
                 if let Some(url) = url {
                     tab.visit(url);
                 }

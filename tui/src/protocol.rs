@@ -30,6 +30,9 @@ pub enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         input: Option<String>,
         activate: bool,
+        /// Which cookie jar the tab uses; absent means the default one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
     #[serde(rename = "tab.close")]
     TabClose { tab_id: u64 },
@@ -146,8 +149,12 @@ mod tests {
         );
         assert_eq!(enc(Request::TabList), json!({"id": 5, "method": "tab.list"}));
         assert_eq!(
-            enc(Request::TabCreate { url: Some("https://a.b".into()), input: None, activate: true }),
+            enc(Request::TabCreate { url: Some("https://a.b".into()), input: None, activate: true, profile: None }),
             json!({"id": 5, "method": "tab.create", "url": "https://a.b", "activate": true})
+        );
+        assert_eq!(
+            enc(Request::TabCreate { url: None, input: Some("a.b".into()), activate: false, profile: Some("work".into()) }),
+            json!({"id": 5, "method": "tab.create", "input": "a.b", "activate": false, "profile": "work"})
         );
         assert_eq!(
             enc(Request::TabNavigate { tab_id: 3, input: "swift concurrency".into() }),

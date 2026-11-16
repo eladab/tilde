@@ -1,6 +1,6 @@
 import AppKit
 import WebKit
-import WeftCore
+import TildeCore
 
 /// The window gives the main menu first refusal on key equivalents, so a page
 /// that swallows every keydown cannot block browser shortcuts.
@@ -85,12 +85,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private var responderObservation: NSKeyValueObservation?
 
     private let supportDir: URL = {
-        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/weft")
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/tilde")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
 
-    private var socketPath: String { supportDir.appendingPathComponent("weft-\(getpid()).sock").path }
+    private var socketPath: String { supportDir.appendingPathComponent("tilde-\(getpid()).sock").path }
 
     // MARK: Launch
 
@@ -108,8 +108,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         startServers()
         startTUI()
 
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if ProcessInfo.processInfo.environment["TILDE_BACKGROUND"] != nil {
+            // Test runs that must not take the keyboard from whatever the user is doing.
+            window.orderBack(nil)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         window.makeFirstResponder(host.view)
     }
 
@@ -123,7 +128,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         window = BrowserWindow(contentRect: content,
                                styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                backing: .buffered, defer: false)
-        window.title = "Weft"
+        window.title = "Tilde"
         window.onCycleTabs = { [weak self] backwards in
             self?.emit("command", ["name": backwards ? "prev-tab" : "next-tab"])
         }
@@ -156,8 +161,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     /// Removes sockets left behind by app processes that did not exit cleanly.
     private func removeStaleSockets() {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: supportDir.path)) ?? []
-        for name in names where name.hasPrefix("weft-") && name.hasSuffix(".sock") {
-            let digits = name.dropFirst("weft-".count).dropLast(".sock".count)
+        for name in names where name.hasPrefix("tilde-") && name.hasSuffix(".sock") {
+            let digits = name.dropFirst("tilde-".count).dropLast(".sock".count)
             guard let pid = pid_t(digits), pid != getpid() else { continue }
             // Signal 0 only checks that the process exists.
             if kill(pid, 0) != 0 && errno == ESRCH {
@@ -192,7 +197,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
 
         let env = ProcessInfo.processInfo.environment
-        if let debugPath = env["WEFT_DEBUG_SOCKET"], !debugPath.isEmpty {
+        if let debugPath = env["TILDE_DEBUG_SOCKET"], !debugPath.isEmpty {
             let debug = SocketServer(path: debugPath)
             debug.onLine = { [weak self] conn, line in
                 guard let self else { return }
@@ -213,34 +218,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private func tuiExecutable() -> String? {
         let fm = FileManager.default
         var candidates: [String] = []
-        if let override = ProcessInfo.processInfo.environment["WEFT_TUI"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment["TILDE_TUI"], !override.isEmpty {
             candidates.append(override)
         }
-        candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/weft-tui").path)
+        candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/tilde-tui").path)
         if let exe = Bundle.main.executableURL {
-            candidates.append(exe.deletingLastPathComponent().appendingPathComponent("weft-tui").path)
+            candidates.append(exe.deletingLastPathComponent().appendingPathComponent("tilde-tui").path)
         }
         return candidates.first { fm.isExecutableFile(atPath: $0) }
     }
 
     private func startTUI() {
         guard let exe = tuiExecutable() else {
-            host.display("weft: cannot find the weft-tui executable.\r\nSet WEFT_TUI or run from Weft.app.\r\n")
-            Log.write("weft-tui not found")
+            host.display("tilde: cannot find the tilde-tui executable.\r\nSet TILDE_TUI or run from Tilde.app.\r\n")
+            Log.write("tilde-tui not found")
             return
         }
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
-        env["WEFT_SOCKET"] = socketPath
-        env["TERM_PROGRAM"] = "Weft"
-        env.removeValue(forKey: "WEFT_DEBUG_SOCKET")
+        env["TILDE_SOCKET"] = socketPath
+        env["TERM_PROGRAM"] = "Tilde"
+        env.removeValue(forKey: "TILDE_DEBUG_SOCKET")
         Log.write("starting \(exe)")
         host.start(executable: exe, args: [], environment: env)
     }
 
     private func tuiExited(_ code: Int32?) {
-        Log.write("weft-tui exited: \(code.map(String.init) ?? "signal")")
+        Log.write("tilde-tui exited: \(code.map(String.init) ?? "signal")")
         if quitting { return }
         if code == 0 {
             quitting = true
@@ -254,7 +259,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         // The TUI may have died without restoring the terminal: leave the
         // alternate screen, stop mouse reporting and bracketed paste, show the cursor.
         host.display("\u{1b}[?1049l\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l\u{1b}[?1006l\u{1b}[?2004l\u{1b}[0m\u{1b}[?25h")
-        host.display("\r\n\u{1b}[1;31mweft-tui exited \(reason).\u{1b}[0m\r\nYour tabs are still loaded. Press any key to restart.\r\n")
+        host.display("\r\n\u{1b}[1;31mtilde-tui exited \(reason).\u{1b}[0m\r\nYour tabs are still loaded. Press any key to restart.\r\n")
     }
 
     private func restartTUIIfWaiting() {
@@ -340,7 +345,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
 
     private func updateTitle() {
         let title = activeWebView?.title ?? ""
-        window.title = title.isEmpty ? "Weft" : title
+        window.title = title.isEmpty ? "Tilde" : title
     }
 
     // MARK: Modes
@@ -471,7 +476,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             } else if let input = req.string("input") {
                 url = InputResolver.resolve(input)
             }
-            let tab = store.create(url: url)
+            let tab = store.create(url: url, profile: req.string("profile"))
             if req.bool("activate") == true { activate(tab.id) }
             return Wire.reply(id: id, ["tab_id": tab.id])
 
@@ -537,7 +542,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
     }
 
-    // MARK: Debug socket (only with WEFT_DEBUG_SOCKET; used by the end-to-end tests)
+    // MARK: Debug socket (only with TILDE_DEBUG_SOCKET; used by the end-to-end tests)
 
     private func handleDebug(line: String, conn: Connection) {
         guard let req = try? Wire.decodeRequest(line) else {
@@ -556,6 +561,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
                 "cell": ["w": cell.width, "h": cell.height],
                 "viewport_visible": viewportVisible,
                 "app_active": NSApp.isActive,
+                "pid": Int(getpid()),
+                "tui_pid": Int(host.processID ?? 0),
                 "tui_running": host.isProcessRunning,
                 "tui_connected": tui != nil,
                 "awaiting_restart": awaitingRestart,

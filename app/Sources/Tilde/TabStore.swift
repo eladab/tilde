@@ -1,6 +1,6 @@
 import AppKit
 import WebKit
-import WeftCore
+import TildeCore
 
 typealias TabID = Int
 
@@ -42,16 +42,24 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var nextID: TabID = 1
     private var dirty = Set<TabID>()
     private var flushScheduled = false
-    private let configuration: WKWebViewConfiguration
+    /// One configuration per profile; tabs of a profile share cookies and logins.
+    private var configurations: [String: WKWebViewConfiguration] = [:]
 
-    override init() {
-        configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+    private func configuration(for profile: String?) -> WKWebViewConfiguration {
+        let name = (profile?.isEmpty == false) ? profile! : Profile.defaultName
+        if let existing = configurations[name] { return existing }
+        let configuration = WKWebViewConfiguration()
+        if let identifier = Profile.storeIdentifier(for: name) {
+            configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: identifier)
+        } else {
+            configuration.websiteDataStore = .default()
+        }
         // Without this WebKit sends a user agent with no browser token and
         // many sites serve a degraded page.
         configuration.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15"
         configuration.preferences.isElementFullscreenEnabled = true
-        super.init()
+        configurations[name] = configuration
+        return configuration
     }
 
     var orderedTabs: [Tab] { order.compactMap { tabs[$0] } }
@@ -63,8 +71,8 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     @discardableResult
-    func create(url: URL?) -> Tab {
-        let tab = adopt(WKWebView(frame: .zero, configuration: configuration))
+    func create(url: URL?, profile: String? = nil) -> Tab {
+        let tab = adopt(WKWebView(frame: .zero, configuration: configuration(for: profile)))
         if let url { tab.webView.load(URLRequest(url: url)) }
         return tab
     }
@@ -134,7 +142,9 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         if action.navigationType == .linkActivated, action.modifierFlags.contains(.command),
            action.targetFrame?.isMainFrame != false {
             let opener = tab(for: webView)?.id
-            let tab = create(url: url)
+            // Same configuration as the page it came from, so it stays in its profile.
+            let tab = adopt(WKWebView(frame: .zero, configuration: webView.configuration))
+            tab.webView.load(URLRequest(url: url))
             delegate?.tabStore(self, didCreate: tab, opener: opener, url: url.absoluteString, background: true)
             return decisionHandler(.cancel)
         }

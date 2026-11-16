@@ -1,6 +1,9 @@
 mod app;
+mod art;
 #[cfg(test)]
 mod app_tests;
+mod keys;
+mod spaces;
 mod mock;
 mod protocol;
 mod resolve;
@@ -14,17 +17,18 @@ use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableMouseCapture
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::crossterm::{cursor, execute};
 use ratatui::Terminal;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// Appends a line to `~/Library/Logs/weft/tui.log`. Never writes to the terminal.
+/// Appends a line to `~/Library/Logs/tilde/tui.log`. Never writes to the terminal.
 #[cfg(not(test))]
 pub fn log(message: &str) {
     use std::fs::{create_dir_all, OpenOptions};
+    use std::io::Write;
     let Some(home) = std::env::var_os("HOME") else { return };
-    let dir = std::path::PathBuf::from(home).join("Library/Logs/weft");
+    let dir = std::path::PathBuf::from(home).join("Library/Logs/tilde");
     let _ = create_dir_all(&dir);
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(dir.join("tui.log")) {
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -46,9 +50,9 @@ fn restore_terminal() {
     let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
 }
 
-const USAGE: &str = "weft-tui: the terminal interface of the Weft browser
+const USAGE: &str = "tilde-tui: the terminal interface of the Tilde browser
 
-It is started by Weft.app, which passes WEFT_SOCKET.
+It is started by Tilde.app, which passes TILDE_SOCKET.
 
 Options:
   --mock      run against a built-in fake engine in any terminal
@@ -62,7 +66,7 @@ fn main() {
         match arg.as_str() {
             "--mock" => mock = true,
             "--version" => {
-                println!("weft-tui {}", env!("CARGO_PKG_VERSION"));
+                println!("tilde-tui {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             "--help" | "-h" => {
@@ -70,7 +74,7 @@ fn main() {
                 return;
             }
             other => {
-                eprintln!("weft-tui: unknown option {other}\n\n{USAGE}");
+                eprintln!("tilde-tui: unknown option {other}\n\n{USAGE}");
                 std::process::exit(2);
             }
         }
@@ -83,16 +87,16 @@ fn main() {
     if mock {
         transport = Box::new(mock::MockEngine::new());
         // The mock never touches the real session unless asked to.
-        session_path = std::env::var_os("WEFT_SESSION").map(std::path::PathBuf::from);
+        session_path = std::env::var_os("TILDE_SESSION").map(std::path::PathBuf::from);
     } else {
-        let Some(socket) = std::env::var_os("WEFT_SOCKET").filter(|s| !s.is_empty()) else {
-            eprintln!("weft-tui is the interface of the Weft browser and is started by Weft.app. Use --mock to try it in a plain terminal.");
+        let Some(socket) = std::env::var_os("TILDE_SOCKET").filter(|s| !s.is_empty()) else {
+            eprintln!("tilde-tui is the interface of the Tilde browser and is started by Tilde.app. Use --mock to try it in a plain terminal.");
             std::process::exit(2);
         };
         let stream = match UnixStream::connect(&socket) {
             Ok(stream) => stream,
             Err(error) => {
-                eprintln!("weft-tui: cannot connect to the app at {}: {error}", socket.to_string_lossy());
+                eprintln!("tilde-tui: cannot connect to the app at {}: {error}", socket.to_string_lossy());
                 std::process::exit(1);
             }
         };
@@ -126,7 +130,7 @@ fn main() {
     if let Err(error) = run(transport, session_path, tx, rx) {
         restore_terminal();
         log(&format!("fatal: {error}"));
-        eprintln!("weft-tui: {error}");
+        eprintln!("tilde-tui: {error}");
         std::process::exit(1);
     }
 }
@@ -177,7 +181,7 @@ fn run(
                 Input::Disconnected => {
                     app.save_session();
                     restore_terminal();
-                    eprintln!("weft-tui: lost the connection to the app.");
+                    eprintln!("tilde-tui: lost the connection to the app.");
                     std::process::exit(1);
                 }
             }

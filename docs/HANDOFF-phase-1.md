@@ -5,7 +5,7 @@ the two modes. This document is everything needed to build phase 1.
 
 ## Goal
 
-A browser you can actually open and click around in: launch Weft, see a
+A browser you can actually open and click around in: launch Tilde, see a
 vertical tab list and URL bar drawn by the TUI, and a native WebKit page sitting
 exactly in the main pane. Open, switch and close tabs, navigate, and move
 keyboard focus between the TUI and the page.
@@ -14,8 +14,20 @@ Phase 1 is done when every item under [Acceptance](#acceptance) passes.
 
 ## Status
 
-Built. `scripts/test.sh` runs 36 unit tests (8 Swift, 28 Rust) and
-`scripts/e2e.py` runs 27 end-to-end checks against `build/Weft.app`; all pass.
+Built. `scripts/test.sh` runs 77 unit tests (14 Swift, 63 Rust) and
+`scripts/e2e.py` runs 42 end-to-end checks; all pass. The end-to-end run uses a
+private copy of `build/Tilde.app` with its own bundle identifier, so it has its
+own WebKit data and can run while the real Tilde is open.
+
+Those counts include features added after phase 1, described in the README:
+sidebar toggle, pinned tabs, renaming, key reference, and spaces. They added
+`command` names (`toggle-sidebar`, `toggle-pin`, `pin-home`, `rename-tab`,
+`help`, `next-space`, `prev-space`, `select-space`, `new-space`, `edit-space`,
+`delete-space`) and one protocol field: `tab.create` takes an optional
+`profile` name. The app maps a profile name to a persistent
+`WKWebsiteDataStore` by hashing it into the store's UUID; an absent name or
+`default` is the default store. Spaces themselves exist only in the TUI.
+
 The end-to-end checks drive the app with synthesised keys and clicks, so the
 following acceptance points are **not** verified and need a person:
 
@@ -36,11 +48,11 @@ Changes to the protocol made during the build are marked "added" below.
 | Decision | Choice | Reason |
 |---|---|---|
 | Shape | One native app window holding an embedded terminal view plus a `WKWebView` subview | Exact alignment, no window tracking, no permissions |
-| TUI | Rust, `ratatui` + `crossterm`, binary `weft-tui` | Mature layout/widgets; phase 2–3 UI (palette, folders) will need them |
-| App | Swift 6, AppKit + WebKit, SwiftPM, assembled into `Weft.app` by a script | A real bundle from day one (Info.plist, menu bar, later entitlements) without an Xcode project |
+| TUI | Rust, `ratatui` + `crossterm`, binary `tilde-tui` | Mature layout/widgets; phase 2–3 UI (palette, folders) will need them |
+| App | Swift 6, AppKit + WebKit, SwiftPM, assembled into `Tilde.app` by a script | A real bundle from day one (Info.plist, menu bar, later entitlements) without an Xcode project |
 | Terminal view | SwiftTerm by default, behind a small `TerminalHost` protocol; libghostty evaluated in M0 | SwiftTerm is a known-working AppKit view; libghostty renders better but its embedding API may not be stable |
 | IPC | Newline-delimited JSON over a Unix domain socket | Debuggable with `nc -U`; no codegen |
-| Lifecycle | The app is the parent: it creates the socket and runs `weft-tui` in the embedded terminal's pty | The app must exist before there is a terminal to draw in |
+| Lifecycle | The app is the parent: it creates the socket and runs `tilde-tui` in the embedded terminal's pty | The app must exist before there is a terminal to draw in |
 | State ownership | The app is the source of truth for web state (URL, title, loading). The TUI owns organisation (order, selection) and the session file | Keeps later spaces/folders out of the app |
 | Mode names | `nav` (TUI focused) and `page` (web view focused) | |
 
@@ -60,12 +72,12 @@ these beyond what the protocol below already allows.
 ## Architecture
 
 ```
- Weft.app window
+ Tilde.app window
  ┌─────────────────────────────────────────┐
  │ TerminalHost view (fills the window)    │
  │  ┌ pty ─────────────────────────────┐   │
- │  │ weft-tui (Rust)                  │   │      JSON lines over
- │  │  sidebar │ viewport rect (blank) │◄──┼────  $WEFT_SOCKET
+ │  │ tilde-tui (Rust)                  │   │      JSON lines over
+ │  │  sidebar │ viewport rect (blank) │◄──┼────  $TILDE_SOCKET
  │  └──────────┼───────────────────────┘   │          │
  │             ▼                           │          ▼
  │   WKWebView subview, framed to the      │   Engine: TabStore ·
@@ -122,14 +134,14 @@ row or column. Minimum size 80×24 cells. Custom title bar styling is later work
 
 ### TUI process lifecycle
 
-- The app starts `weft-tui` with `WEFT_SOCKET` set to
-  `~/Library/Application Support/weft/weft-<app pid>.sock`.
+- The app starts `tilde-tui` with `TILDE_SOCKET` set to
+  `~/Library/Application Support/tilde/tilde-<app pid>.sock`.
 - TUI exit code 0 → the app quits.
 - Non-zero exit → the web view is hidden, the terminal shows the TUI's output
   and "press any key to restart". On restart the TUI calls `tab.list` and
   re-adopts the tabs that are still loaded.
-- `weft-tui --mock` runs against an in-process fake engine in any terminal, for
-  UI development and tests. Without `WEFT_SOCKET` and without `--mock` it prints
+- `tilde-tui --mock` runs against an in-process fake engine in any terminal, for
+  UI development and tests. Without `TILDE_SOCKET` and without `--mock` it prints
   a one-line explanation and exits.
 
 ## Protocol v1
@@ -146,7 +158,7 @@ Requests (TUI → app):
 | `viewport.set` | `col`, `row`, `cols`, `rows` | Cell rectangle for the page. Sent on start, resize and layout change |
 | `viewport.visible` | `visible: bool` | TUI hides the page when it needs the space |
 | `tab.list` | | Reply: `tabs` with full state of each, and `active` |
-| `tab.create` | `url?`, `input?`, `activate: bool` | Reply: `tab_id`. `input` (added) is raw URL bar text, resolved like `tab.navigate`, so a new tab needs one request |
+| `tab.create` | `url?`, `input?`, `profile?`, `activate: bool` | Reply: `tab_id`. `input` (added) is raw URL bar text, resolved like `tab.navigate`, so a new tab needs one request. `profile` (added) names the cookie store; tabs a page opens stay in their opener's profile |
 | `tab.close` | `tab_id` | |
 | `tab.activate` | `tab_id` | Swaps the visible web view |
 | `tab.navigate` | `tab_id`, `input` | Raw URL bar text; the app resolves URL vs. search. Reply includes the resolved `url` (added) |
@@ -175,7 +187,7 @@ scheme WebKit does not handle (`mailto:` and the like) go to the system; a
 failed load shows an error page that keeps the failed address; stale sockets
 from crashed app processes are removed at launch.
 
-A second socket exists only when `WEFT_DEBUG_SOCKET` is set. It serves the
+A second socket exists only when `TILDE_DEBUG_SOCKET` is set. It serves the
 `debug.*` requests used by `scripts/e2e.py` (state dump, typing, synthesised
 keys and clicks, page JavaScript, resize, killing a web process). It is not
 part of the protocol and the TUI never sees it.
@@ -219,12 +231,12 @@ Menu shortcuts, available in both modes, delivered as `command`:
 After a navigation is submitted from the URL bar, switch to `page` mode.
 
 Session: on every tab-set change, write
-`~/Library/Application Support/weft/session.json` (ordered URLs, titles, active
+`~/Library/Application Support/tilde/session.json` (ordered URLs, titles, active
 index) atomically. On launch, restore it: create only the active tab in the app
 and keep the rest as unloaded entries that are created on first activation.
 With no session, open one tab at `https://webkit.org`.
 
-Logs: app to `~/Library/Logs/weft/app.log`, TUI to `~/Library/Logs/weft/tui.log`.
+Logs: app to `~/Library/Logs/tilde/app.log`, TUI to `~/Library/Logs/tilde/tui.log`.
 Neither writes diagnostics into the terminal view.
 
 ## Milestones
@@ -250,10 +262,10 @@ Answer and write down in `docs/spike-notes.md`:
   visible tearing?
 
 **M1. App with protocol.** Window, `TerminalHost`, `TabStore`, socket server,
-all requests and events. Driven by hand: run `nc -U "$WEFT_SOCKET"` in the
+all requests and events. Driven by hand: run `nc -U "$TILDE_SOCKET"` in the
 embedded terminal's shell.
 
-**M2. TUI skeleton.** `weft-tui` launched by the app, draws the layout, sends
+**M2. TUI skeleton.** `tilde-tui` launched by the app, draws the layout, sends
 `viewport.set`, one tab, URL bar navigation, `--mock` mode, clean exit.
 
 **M3. Tabs.** Tab list bound to app events, create/close/switch/reorder,
@@ -264,11 +276,11 @@ Edit menu, reserved-shortcut precedence.
 
 **M5. Robustness.** Resize, session save/restore, TUI-crash restart with
 `tab.list` re-adoption, web-process-crash handling, `justfile` with `build`,
-`bundle`, `run`, `test`; `Weft.app` bundles `weft-tui` and is ad-hoc signed.
+`bundle`, `run`, `test`; `Tilde.app` bundles `tilde-tui` and is ad-hoc signed.
 
 ## Acceptance
 
-1. `just run` opens a Weft window showing the TUI with a WebKit page filling the
+1. `just run` opens a Tilde window showing the TUI with a WebKit page filling the
    viewport rectangle, edges aligned to the cell grid within 1 pt.
 2. A YouTube video plays with sound; a text field on a page accepts typing,
    paste, and an IME or dead-key sequence.
@@ -284,8 +296,8 @@ Edit menu, reserved-shortcut precedence.
 8. Resizing the window, including a live drag, keeps the page glued to its cell
    rectangle; moving the window to a display with a different scale factor does too.
 9. Quit and relaunch restores tabs, order and active tab.
-10. `kill -9` of `weft-tui` shows the restart prompt; after restart the same tabs
-    are present without reloading. Quitting leaves no `weft-tui` process.
+10. `kill -9` of `tilde-tui` shows the restart prompt; after restart the same tabs
+    are present without reloading. Quitting leaves no `tilde-tui` process.
 11. Protocol encode/decode and URL-input resolution have unit tests on both
     sides; the TUI has tests against the mock engine; `just test` passes.
 

@@ -1,8 +1,8 @@
 [package]
-name = "weft-tui"
+name = "tilde-tui"
 version = "0.1.0"
 edition = "2021"
-description = "Terminal interface for the Weft browser"
+description = "Terminal interface for the Tilde browser"
 
 [dependencies]
 ratatui = "0.29"

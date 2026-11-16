@@ -34,10 +34,10 @@ enum MainMenu {
             menu.addItem(item)
         }
 
-        let app = submenu("Weft")
-        standard(app, "Hide Weft", #selector(NSApplication.hide(_:)), key: "h")
+        let app = submenu("Tilde")
+        standard(app, "Hide Tilde", #selector(NSApplication.hide(_:)), key: "h")
         app.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Weft", action: #selector(AppController.quitRequested(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Tilde", action: #selector(AppController.quitRequested(_:)), keyEquivalent: "q")
         quit.target = target
         app.addItem(quit)
 
@@ -59,6 +59,7 @@ enum MainMenu {
         let view = submenu("View")
         command(view, "Reload Page", "reload", key: "r")
         command(view, "Switch Between Tabs and Page", "toggle-mode", key: ".")
+        command(view, "Show or Hide Sidebar", "toggle-sidebar", key: "b")
 
         let history = submenu("History")
         command(history, "Back", "back", key: "[")
@@ -68,14 +69,36 @@ enum MainMenu {
         command(tabs, "Next Tab", "next-tab", key: "\t", mods: .control)
         command(tabs, "Previous Tab", "prev-tab", key: "\t", mods: [.control, .shift])
         tabs.addItem(.separator())
+        command(tabs, "Pin or Unpin Tab", "toggle-pin", key: "d")
+        // An uppercase key equivalent is how AppKit spells Shift for letters.
+        command(tabs, "Return to Pinned Page", "pin-home", key: "H")
+        command(tabs, "Rename Tab…", "rename-tab", key: "")
+        tabs.addItem(.separator())
         for n in 1...9 {
             command(tabs, n == 9 ? "Last Tab" : "Tab \(n)", "select-tab", key: "\(n)", arg: n)
+        }
+
+        let spaces = submenu("Spaces")
+        command(spaces, "New Space…", "new-space", key: "N")
+        command(spaces, "Edit Space…", "edit-space", key: "")
+        command(spaces, "Delete Space…", "delete-space", key: "")
+        spaces.addItem(.separator())
+        let left = String(UnicodeScalar(NSLeftArrowFunctionKey)!)
+        let right = String(UnicodeScalar(NSRightArrowFunctionKey)!)
+        command(spaces, "Previous Space", "prev-space", key: left, mods: [.command, .option])
+        command(spaces, "Next Space", "next-space", key: right, mods: [.command, .option])
+        spaces.addItem(.separator())
+        for n in 1...9 {
+            command(spaces, "Space \(n)", "select-space", key: "\(n)", mods: .control, arg: n)
         }
 
         let window = submenu("Window")
         standard(window, "Minimize", #selector(NSWindow.performMiniaturize(_:)), key: "m")
         standard(window, "Zoom", #selector(NSWindow.performZoom(_:)), key: "")
         NSApp.windowsMenu = window
+
+        let help = submenu("Help")
+        command(help, "Keyboard Shortcuts", "help", key: "/")
 
         return main
     }
