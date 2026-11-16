@@ -13,7 +13,7 @@ jobs:
   release:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check that the tag is the app's version
         run: |
@@ -49,4 +49,9 @@ jobs:
         run: |
           files=("build/Tilde-$VERSION.dmg")
           [ -f build/appcast.xml ] && files+=(build/appcast.xml)
-          gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "Tilde $VERSION" --generate-notes --verify-tag
+          # Running this again for the same tag replaces the files.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "Tilde $VERSION" --generate-notes --verify-tag
+          fi
