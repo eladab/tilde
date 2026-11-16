@@ -14,7 +14,13 @@ VERSION="${1:-}"
 ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null || { echo "v$VERSION is already tagged" >&2; exit 1; }
 
 # Sparkle compares CFBundleVersion, so both keys carry the same number.
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $VERSION" app/Info.plist
+# (Edited in place: PlistBuddy would rewrite the whole file without comments.)
+for key in CFBundleShortVersionString CFBundleVersion; do
+    sed -i '' -E "/<key>$key<\\/key>/{n;s|<string>.*</string>|<string>$VERSION</string>|;}" app/Info.plist
+done
+[ "$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" app/Info.plist)" = "$VERSION" ] &&
+    [ "$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" app/Info.plist)" = "$VERSION" ] ||
+    { echo "could not set the version in app/Info.plist" >&2; exit 1; }
 sed -i '' -E "1,/^version = /s/^version = .*/version = \"$VERSION\"/" tui/Cargo.toml
 cargo update --quiet --offline --manifest-path tui/Cargo.toml --package tilde-tui
 
