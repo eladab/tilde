@@ -55,6 +55,10 @@ enum MainMenu {
         standard(edit, "Copy", #selector(NSText.copy(_:)), key: "c")
         standard(edit, "Paste", #selector(NSText.paste(_:)), key: "v")
         standard(edit, "Select All", #selector(NSText.selectAll(_:)), key: "a")
+        edit.addItem(.separator())
+        let fill = NSMenuItem(title: "Fill from Passwords…", action: #selector(AppController.fillFromPasswords(_:)), keyEquivalent: "\\")
+        fill.target = target
+        edit.addItem(fill)
 
         let view = submenu("View")
         command(view, "Reload Page", "reload", key: "r")

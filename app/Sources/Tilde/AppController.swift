@@ -83,6 +83,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private var awaitingRestart = false
     private var quitting = false
     private var responderObservation: NSKeyValueObservation?
+    private let passwordFill = PasswordFill()
 
     private let supportDir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/tilde")
@@ -371,6 +372,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
 
     /// Report the real focus state; the TUI only ever displays what it is told.
     private func syncMode() {
+        // The relay field of a password fill holds focus on the page's behalf.
+        if passwordFill.isActive { return }
         let mode = currentMode()
         if mode == reportedMode { return }
         reportedMode = mode
@@ -385,6 +388,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         var fields: [String: Any] = ["name": command.name]
         if let arg = command.arg { fields["arg"] = arg }
         emit("command", fields)
+    }
+
+    @objc func fillFromPasswords(_ sender: Any?) {
+        guard currentMode() == .page, let web = activeWebView, !passwordFill.isActive else {
+            return NSSound.beep()
+        }
+        passwordFill.begin(web: web, window: window, container: container) { [weak self] outcome in
+            Log.write("fill: \(outcome)")
+            if outcome.hasPrefix("failed") { NSSound.beep() }
+            self?.syncMode()
+        }
     }
 
     private func emit(_ event: String, _ fields: [String: Any] = [:]) {

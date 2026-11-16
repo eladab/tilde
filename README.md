@@ -119,6 +119,8 @@ forward, `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle tabs, `Cmd+1`…`Cmd+9` select on
 `Cmd+B` toggles the sidebar, `Cmd+D` pins or unpins, `Cmd+Shift+H` returns to
 the pinned page, `Cmd+/` shows the key reference, `Opt+Cmd+←` and `Opt+Cmd+→`
 switch space, `Ctrl+1`…`Ctrl+9` select one, `Cmd+Shift+N` makes a new one.
+`Cmd+\` fills the focused page field from the macOS Passwords app: pick a login
+in the system picker, then its username or password.
 Cmd-click opens a link in a background tab. Rename is in the Tabs menu; editing
 and deleting spaces are in the Spaces menu.
 
