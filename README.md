@@ -30,6 +30,19 @@ scrolling, IME.
 └────────────────────────────────────────────────────────────────────┘
 ```
 
+## Install
+
+Download the disk image of the [latest release](https://github.com/eladab/tilde/releases/latest),
+open it and drag Tilde to Applications. It needs macOS 14 or later on Apple
+silicon.
+
+Releases are not notarized by Apple, so the first time macOS refuses to open
+Tilde: allow it under System Settings → Privacy & Security → **Open Anyway**
+(or run `xattr -dr com.apple.quarantine /Applications/Tilde.app`).
+
+After that Tilde keeps itself up to date: it offers a new release when there
+is one, and **Tilde → Check for Updates…** looks at once.
+
 ## How it works
 
 Tilde is a small native macOS app with one window. That window contains two
@@ -88,7 +101,9 @@ python3 scripts/e2e.py     # end-to-end checks on a private copy of build/Tilde.
 ```
 
 `bundle.sh` signs the app with the first code-signing identity in your keychain
-(or the one named by `TILDE_SIGN_IDENTITY`), and ad hoc if there is none. With
+(or the one named by `TILDE_SIGN_IDENTITY`; `-` means none), and ad hoc if
+there is none. A signature carries the name on its certificate, so do not hand
+out a build signed with a personal one. With
 an ad-hoc signature macOS treats every build as a different app, so keychain
 questions such as "Tilde wants to use … Tilde WebCrypto Master Key" (asked by
 WebKit for sites like WhatsApp Web) return after each rebuild.
@@ -101,6 +116,30 @@ needs a Developer ID certificate and notarization.
 With [`just`](https://github.com/casey/just) installed: `just run`, `just test`,
 `just dev` (debug build, no bundle), `just mock` (the TUI alone against a fake
 engine, in any terminal).
+
+### Releases
+
+```
+./scripts/release.sh 0.2.0        # sets the version, commits, tags v0.2.0
+git push origin main v0.2.0       # GitHub builds and publishes the release
+```
+
+The pushed tag runs `.github/workflows/release.yml`, which tests, builds the
+disk image with an ad-hoc signature, and publishes a release holding
+`Tilde-<version>.dmg` and `appcast.xml`.
+
+`appcast.xml` is what makes installed copies update. Tilde embeds
+[Sparkle](https://sparkle-project.org), which reads the `appcast.xml` of the
+newest release (`SUFeedURL` in `app/Info.plist`), and installs the image it
+names only if that image is signed with the private half of `SUPublicEDKey`.
+The workflow signs with the repository secret `SPARKLE_PRIVATE_KEY`; without
+the secret it still publishes the release, but with no feed.
+
+To release from a fork, make a key pair of your own with
+`app/.build/artifacts/sparkle/Sparkle/bin/generate_keys --account tilde`
+(after a build), put the public key and your repository's address in
+`app/Info.plist`, and store the output of `generate_keys --account tilde -x
+<file>` as the secret.
 
 ### Keys
 
@@ -251,7 +290,7 @@ Files: session, `history.json` and `downloads.json` in
 
 ## Requirements
 
-- macOS 15 or later (developed on macOS 27)
+- macOS 14 or later (developed on macOS 27)
 - Swift 6 toolchain, Rust stable
 - No particular terminal emulator: Tilde embeds its own terminal view
 
@@ -279,9 +318,14 @@ tilde/
 │       └── Tilde/            window, terminal host, tab store, socket server
 ├── tui/                     Rust crate → tilde-tui
 │   └── src/                 app logic, views, history, drawing, protocol, mock engine
-├── scripts/                 bundle.sh, dmg.sh, test.sh, e2e.py, make-icon.sh
+├── scripts/                 bundle.sh, dmg.sh, release.sh, appcast.sh, test.sh, e2e.py, make-icon.sh
+├── .github/workflows/       tests on every push; a release on every version tag
 └── justfile                 thin wrappers over scripts/
 ```
+
+## License
+
+[MIT](LICENSE).
 
 ## Alternatives considered
 

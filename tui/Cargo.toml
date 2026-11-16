@@ -3,6 +3,8 @@ name = "tilde-tui"
 version = "0.1.0"
 edition = "2021"
 description = "Terminal interface for the Tilde browser"
+license = "MIT"
+repository = "https://github.com/eladab/tilde"
 
 [dependencies]
 ratatui = "0.29"

@@ -17,7 +17,7 @@
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>0.1.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSApplicationCategoryType</key>
@@ -53,6 +53,12 @@
             </array>
         </dict>
     </array>
+    <!-- Updates (Sparkle): the feed is a file of the newest GitHub release, and
+         updates must be signed with the private half of this key. -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/eladab/tilde/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>k2ZxtZXSfWMXjRP8mROe0Gx1vHT+lHTxobhJZApH3OA=</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

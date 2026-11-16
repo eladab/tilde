@@ -38,6 +38,9 @@ enum MainMenu {
         let makeDefault = NSMenuItem(title: "Make Tilde the Default Browser…", action: #selector(AppController.makeDefaultBrowser(_:)), keyEquivalent: "")
         makeDefault.target = target
         app.addItem(makeDefault)
+        let update = NSMenuItem(title: "Check for Updates…", action: #selector(AppController.checkForUpdates(_:)), keyEquivalent: "")
+        update.target = target
+        app.addItem(update)
         app.addItem(.separator())
         standard(app, "Hide Tilde", #selector(NSApplication.hide(_:)), key: "h")
         app.addItem(.separator())

@@ -1,0 +1,52 @@
+# Publishes a release when a version tag is pushed (see scripts/release.sh):
+# the disk image, and the update feed that installed copies read.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag is the app's version
+        run: |
+          version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" app/Info.plist)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::the tag is $GITHUB_REF_NAME but app/Info.plist says $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Unit tests
+        run: ./scripts/test.sh
+
+      # Ad hoc: there is no Developer ID certificate here.
+      - name: Disk image
+        run: ./scripts/dmg.sh
+        env:
+          TILDE_SIGN_IDENTITY: "-"
+
+      - name: Update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::warning::no SPARKLE_PRIVATE_KEY secret: released without an update feed, so installed copies will not be offered this version"
+            exit 0
+          fi
+          ./scripts/appcast.sh
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("build/Tilde-$VERSION.dmg")
+          [ -f build/appcast.xml ] && files+=(build/appcast.xml)
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "Tilde $VERSION" --generate-notes --verify-tag

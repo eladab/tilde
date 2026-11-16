@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: sw_vers && swift --version && cargo --version
+      - name: Unit tests
+        run: ./scripts/test.sh
+      - name: Bundle
+        run: ./scripts/bundle.sh
+        env:
+          TILDE_SIGN_IDENTITY: "-"

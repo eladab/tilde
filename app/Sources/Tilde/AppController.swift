@@ -63,7 +63,8 @@ enum Mode: String {
 }
 
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, TabStoreDelegate {
-    static let version = "0.1.0"
+    /// The bundle's version; an unbundled debug build has none.
+    static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
 
     private var window: BrowserWindow!
     private var container: NSView!
@@ -84,6 +85,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private var quitting = false
     private var responderObservation: NSKeyValueObservation?
     private let passwordFill = PasswordFill()
+    private var updates: Updates?
     /// Addresses other apps asked us to open before the TUI could take them.
     private var urlsToOpen: [URL] = []
     /// The TUI has asked for the tabs, so it can be told to open more.
@@ -124,6 +126,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             self.emit("downloads.changed", ["downloads": self.downloads.records.map(\.wire)])
         }
         NSApp.mainMenu = MainMenu.build(target: self)
+        updates = Updates()
 
         host = SwiftTermHost(font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular))
         host.onExit = { [weak self] code in self?.tuiExited(code) }
@@ -347,6 +350,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     }
 
     /// Asks macOS to send web links to Tilde. macOS confirms with the user.
+    @objc func checkForUpdates(_ sender: Any?) {
+        updates?.check()
+    }
+
     @objc func makeDefaultBrowser(_ sender: Any?) {
         let app = Bundle.main.bundleURL
         NSWorkspace.shared.setDefaultApplication(at: app, toOpenURLsWithScheme: "http") { error in
@@ -826,5 +833,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         default:
             conn.send(Wire.failure(id: id, "unknown method \(req.method)"))
         }
+    }
+}
+
+extension AppController: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates(_:)) {
+            return updates?.canCheck ?? false
+        }
+        return true
     }
 }

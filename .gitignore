@@ -3,3 +3,4 @@ app/.build/
 tui/target/
 spike/
 .DS_Store
+__pycache__/

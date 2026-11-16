@@ -14,6 +14,10 @@ bundle:
 dmg:
     ./scripts/dmg.sh
 
+# Set the version, commit and tag it (pushing the tag publishes the release)
+release version:
+    ./scripts/release.sh {{version}}
+
 # Build the app bundle and open it
 run: bundle
     open build/Tilde.app
