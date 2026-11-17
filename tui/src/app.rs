@@ -12,6 +12,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, M
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// How long the selection rests on a tab that is not loaded before its page
+/// is opened, so that stepping past such tabs does not load them.
+pub const LOAD_DELAY: Duration = Duration::from_millis(300);
 
 pub const SIDEBAR_WIDTH: u16 = 28;
 pub const HOME_URL: &str = "https://webkit.org";
@@ -334,6 +339,8 @@ pub struct App {
     pub(crate) instance: Option<u64>,
     /// The tab the app is currently showing, as far as we have told it.
     pub(crate) active_sent: Option<u64>,
+    /// The entry (by key) whose page is not opened before the given moment.
+    pub(crate) load_due: Option<(u64, Instant)>,
     pub(crate) visible_sent: Option<bool>,
     pub(crate) viewport_sent: Option<Rect>,
     /// Entries closed while their `tab.create` was still in flight.
@@ -380,6 +387,7 @@ impl App {
             next_key: 1,
             instance: None,
             active_sent: None,
+            load_due: None,
             visible_sent: None,
             viewport_sent: None,
             orphans: HashSet::new(),
@@ -810,6 +818,10 @@ impl App {
             }
             None => {
                 self.set_page_visible(false);
+                // Stepping past a tab that is not loaded does not open it.
+                if self.load_due.is_some_and(|(key, _)| key == entry.key) {
+                    return;
+                }
                 if !entry.pending && !entry.url.is_empty() {
                     self.tabs[self.selected].pending = true;
                     self.tabs[self.selected].loading = true;
@@ -833,6 +845,12 @@ impl App {
     // ----- actions -----
 
     pub fn select(&mut self, index: usize) {
+        self.select_at(index, None);
+    }
+
+    /// Selects a tab. With `load_at`, a tab that is not loaded waits until
+    /// then, and is opened by `tick` only if the selection is still on it.
+    fn select_at(&mut self, index: usize, load_at: Option<Instant>) {
         if index >= self.tabs.len() || index == self.selected {
             return;
         }
@@ -843,7 +861,27 @@ impl App {
         self.selected = index;
         self.message = None;
         self.session_dirty = true;
+        self.load_due = load_at.map(|at| (key, at));
         self.ensure_active();
+    }
+
+    /// When `tick` next has something to do, if it does.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.load_due.map(|(_, at)| at)
+    }
+
+    /// Opens the selected tab once the selection has rested on it long enough.
+    pub fn tick(&mut self, now: Instant) {
+        let Some((key, at)) = self.load_due else { return };
+        let selected = self.tabs.get(self.selected).is_some_and(|entry| entry.key == key);
+        if selected && now < at {
+            return;
+        }
+        self.load_due = None;
+        if selected {
+            self.ensure_active();
+            self.pump();
+        }
     }
 
     pub(crate) fn step(&mut self, delta: i64, wrap: bool) {
@@ -853,7 +891,7 @@ impl App {
         }
         let raw = self.selected as i64 + delta;
         let target = if wrap { raw.rem_euclid(len) } else { raw.clamp(0, len - 1) };
-        self.select(target as usize);
+        self.select_at(target as usize, Some(Instant::now() + LOAD_DELAY));
     }
 
     fn move_selected(&mut self, delta: i64) {

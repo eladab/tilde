@@ -29,6 +29,11 @@ fn key(app: &mut App, c: char) {
     app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
 }
 
+/// Lets the selection rest long enough for a tab that is not loaded to open.
+fn rest(app: &mut App) {
+    app.tick(std::time::Instant::now() + crate::app::LOAD_DELAY);
+}
+
 fn press(app: &mut App, code: KeyCode) {
     app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
 }
@@ -345,6 +350,8 @@ fn session_is_saved_and_restored_lazily() {
     assert!(app.tabs[0].tab_id.is_none());
     assert_eq!(app.tabs[0].title, "webkit.org", "titles come from the session until loaded");
     key(&mut app, 'j');
+    assert_eq!(fresh.borrow().tab_ids().len(), 1, "not while the selection is passing by");
+    rest(&mut app);
     assert_eq!(fresh.borrow().tab_ids().len(), 2, "others load on first activation");
     assert_eq!(fresh.borrow().active, app.tabs[2].tab_id);
     let _ = std::fs::remove_file(&path);
@@ -606,6 +613,7 @@ fn closing_a_pinned_tab_unloads_it_but_keeps_the_pin() {
 
     // Selecting it loads it again, at the pinned page.
     key(&mut app, 'k');
+    rest(&mut app);
     assert_eq!(app.selected, 0);
     let reloaded = app.tabs[0].tab_id.expect("loaded again");
     assert_eq!(engine.borrow().url_of(reloaded).unwrap(), "https://b.example");
@@ -942,6 +950,7 @@ fn editing_a_space_changes_name_colour_and_profile() {
     assert_eq!(engine.borrow().profile_of(ids[0]).unwrap(), "me");
     assert_eq!(engine.borrow().active, Some(ids[0]));
     key(&mut app, 'j');
+    rest(&mut app);
     assert_eq!(engine.borrow().profile_of(app.tabs[1].tab_id.unwrap()).unwrap(), "me");
 }
 
@@ -1672,4 +1681,44 @@ fn a_link_from_another_app_opens_in_a_new_tab() {
     app.handle_line(r#"{"event":"open-url","url":"https://second.example/"}"#);
     assert_eq!(app.tabs.len(), 5);
     assert_eq!(app.current().unwrap().url, "https://second.example/");
+}
+
+#[test]
+fn stepping_past_unloaded_tabs_does_not_load_them() {
+    let path = temp_session("debounce");
+    let _ = std::fs::remove_file(&path);
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let mut app = start_with(engine.clone(), Some(path.clone()));
+    open(&mut app, "a.example");
+    open(&mut app, "b.example");
+    app.select(0);
+    app.quit();
+
+    // A new app process: only the selected tab (the first) is loaded.
+    let mut saved = session::load(&path).unwrap();
+    saved.instance = Some(999);
+    session::save(&path, &saved).unwrap();
+    let fresh = Rc::new(RefCell::new(MockEngine::new()));
+    let mut app = start_with(fresh.clone(), Some(path.clone()));
+    assert_eq!(fresh.borrow().tab_ids().len(), 1);
+
+    // Passing over the second tab on the way to the third loads only the third.
+    let now = std::time::Instant::now();
+    key(&mut app, 'j');
+    assert!(!app.tabs[1].loading, "nothing is shown as loading yet");
+    app.tick(now + crate::app::LOAD_DELAY / 2);
+    assert_eq!(fresh.borrow().tab_ids().len(), 1, "the delay has not passed");
+    key(&mut app, 'j');
+    rest(&mut app);
+    assert_eq!(app.tabs[1].tab_id, None, "the tab passed over stays unloaded");
+    assert_eq!(fresh.borrow().active, app.tabs[2].tab_id);
+    assert_eq!(fresh.borrow().tab_ids().len(), 2);
+
+    // Stepping back to a loaded tab shows it at once; picking a tab directly loads it at once.
+    key(&mut app, 'k');
+    key(&mut app, 'k');
+    assert_eq!(fresh.borrow().active, app.tabs[0].tab_id);
+    app.select(1);
+    assert_eq!(fresh.borrow().tab_ids().len(), 3);
+    let _ = std::fs::remove_file(&path);
 }

@@ -172,7 +172,11 @@ fn run(
             break;
         }
 
-        let mut next = rx.recv_timeout(Duration::from_millis(250)).ok();
+        // Wakes when a tab waiting to be opened is due, and at least every 250 ms.
+        let wait = app.deadline().map_or(Duration::from_millis(250), |at| {
+            at.saturating_duration_since(Instant::now()).min(Duration::from_millis(250))
+        });
+        let mut next = rx.recv_timeout(wait).ok();
         while let Some(input) = next {
             match input {
                 Input::Terminal(Event::Key(key)) => app.handle_key(key),
@@ -192,6 +196,8 @@ fn run(
             }
             next = rx.try_recv().ok();
         }
+
+        app.tick(Instant::now());
 
         if (app.session_dirty || app.history.dirty) && last_save.elapsed() > Duration::from_millis(500) {
             app.save_session();
