@@ -57,6 +57,11 @@ final class BrowserWindow: NSWindow {
     }
 }
 
+/// Shows a picture of a page; clicks go through to the page underneath.
+final class PlaceholderView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 enum Mode: String {
     case nav
     case page
@@ -75,6 +80,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private var tui: Connection?
 
     private var activeID: TabID?
+    /// The last picture of the active page, drawn over it until it has drawn itself.
+    private var placeholder: NSView?
     private var viewport: CellRect?
     private var viewportVisible = true
     /// True from a TUI crash until the restarted TUI lays the page out again.
@@ -395,6 +402,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
         let hidden = !pageShown
         if web.isHidden != hidden { web.isHidden = hidden }
+        if hidden || placeholder?.frame != web.frame { removePlaceholder() }
         if hidden && currentMode() == .page {
             window.makeFirstResponder(host.view)
         }
@@ -403,15 +411,110 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private func activate(_ id: TabID) {
         guard let tab = store.tab(id) else { return }
         if activeID != id {
-            activeWebView?.removeFromSuperview()
+            let previous = activeID.flatMap { store.tab($0) }
+            removePlaceholder()
             activeID = id
+            tab.turn += 1
             tab.webView.isHidden = !pageShown
             if let viewport { tab.webView.frame = host.frame(for: viewport) }
-            container.addSubview(tab.webView, positioned: .above, relativeTo: host.view)
+            // Above the page being left, which stays in the window until its picture is taken.
+            container.addSubview(tab.webView, positioned: .above, relativeTo: previous?.webView ?? host.view)
+            if let previous { park(previous) }
+            welcomeBack(tab)
         }
         applyViewport()
         applyResponder()
         updateTitle()
+    }
+
+    // MARK: Switching between pages
+
+    /// Takes a tab out of the window, keeping a picture of its page for its return.
+    private func park(_ tab: Tab) {
+        tab.turn += 1
+        tab.leftAt = Date()
+        let web = tab.webView
+        guard web.superview != nil, !web.isHidden, web.url != nil else { return web.removeFromSuperview() }
+        let turn = tab.turn
+        let size = web.bounds.size
+        var parked = false
+        let finish: (NSImage?) -> Void = { [weak tab] image in
+            guard !parked, let tab, tab.turn == turn else { return }
+            parked = true
+            tab.webView.removeFromSuperview()
+            guard let image else { return }
+            DispatchQueue.global(qos: .utility).async {
+                guard let jpeg = Self.jpeg(from: image) else { return }
+                DispatchQueue.main.async { [weak tab] in
+                    if let tab, tab.turn == turn { tab.snapshot = (jpeg, size) }
+                }
+            }
+        }
+        web.takeSnapshot(with: nil) { image, _ in finish(image) }
+        // A page that cannot be pictured must not stay in the window, where it would keep running.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { finish(nil) }
+    }
+
+    /// Covers a page that has been away with its last picture until it has drawn
+    /// itself again, and notes in the log how long that took.
+    private func welcomeBack(_ tab: Tab) {
+        guard let leftAt = tab.leftAt, pageShown else { return }
+        let started = Date()
+        let turn = tab.turn
+        let web = tab.webView
+        var cover = "no picture"
+        if let snapshot = tab.snapshot {
+            if abs(snapshot.size.width - web.frame.width) > 1 || abs(snapshot.size.height - web.frame.height) > 1 {
+                cover = "picture of another size"
+            } else if let image = Self.image(from: snapshot.jpeg) {
+                let view = PlaceholderView(frame: web.frame)
+                view.wantsLayer = true
+                view.layer?.contents = image
+                view.layer?.contentsGravity = .resize
+                container.addSubview(view, positioned: .above, relativeTo: web)
+                placeholder = view
+                cover = "picture ready in \(Self.milliseconds(since: started)) ms"
+            }
+        }
+        var done = false
+        let finish: (String) -> Void = { [weak self, weak tab] outcome in
+            guard !done, let self, let tab, tab.turn == turn else { return }
+            done = true
+            self.removePlaceholder()
+            let host = tab.webView.backForwardList.currentItem?.url.host ?? "-"
+            Log.write("switch: tab \(tab.id) \(host) \(outcome) after \(Int(started.timeIntervalSince(leftAt))) s away (\(cover))")
+        }
+        // Frames are only produced for a page that is visible, so the second one
+        // means the page is awake and has drawn itself.
+        let script = "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+        web.callAsyncJavaScript(script, arguments: [:], in: nil, in: .defaultClient) { result in
+            switch result {
+            case .success: finish("drawn in \(Self.milliseconds(since: started)) ms")
+            case .failure(let error): finish("not measured (\(error.localizedDescription))")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { finish("not drawn within 2000 ms") }
+    }
+
+    private func removePlaceholder() {
+        placeholder?.removeFromSuperview()
+        placeholder = nil
+    }
+
+    private static func milliseconds(since date: Date) -> Int { Int(-date.timeIntervalSinceNow * 1000) }
+
+    private static func jpeg(from image: NSImage) -> Data? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    private static func image(from jpeg: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
+        // Decoded now, not while the window is being drawn.
+        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
     }
 
     private func updateTitle() {
@@ -529,6 +632,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     func tabStore(_ store: TabStore, didClose id: TabID) {
         if activeID == id {
             activeID = nil
+            removePlaceholder()
             window.makeFirstResponder(host.view)
             updateTitle()
         }
@@ -612,6 +716,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
                 store.close(tab.id)
                 if wasActive {
                     activeID = nil
+                    removePlaceholder()
                     window.makeFirstResponder(host.view)
                     updateTitle()
                 }

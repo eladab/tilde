@@ -9,6 +9,15 @@ final class Tab {
     let webView: WKWebView
     var observations: [NSKeyValueObservation] = []
 
+    /// When the tab was last switched away from; nil while it has never been left.
+    var leftAt: Date?
+    /// What the page looked like then, as JPEG, with its size in points. It
+    /// stands in for the page on return, until the page has drawn itself.
+    var snapshot: (jpeg: Data, size: NSSize)?
+    /// Advances each time the tab is shown or left, so that work begun for an
+    /// earlier turn can tell it is out of date.
+    var turn = 0
+
     init(id: TabID, webView: WKWebView) {
         self.id = id
         self.webView = webView
@@ -212,7 +221,11 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        if let tab = tab(for: webView) { delegate?.tabStore(self, didCrash: tab.id) }
+        guard let tab = tab(for: webView) else { return }
+        let host = webView.backForwardList.currentItem?.url.host ?? "-"
+        let away = tab.leftAt.map { "\(Int(-$0.timeIntervalSinceNow)) s in the background" } ?? "in front"
+        Log.write("web process terminated: tab \(tab.id) \(host), \(away)")
+        delegate?.tabStore(self, didCrash: tab.id)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
