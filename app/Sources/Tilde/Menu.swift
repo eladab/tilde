@@ -74,6 +74,7 @@ enum MainMenu {
         command(view, "Switch Between Tabs and Page", "toggle-mode", key: ".")
         command(view, "Show or Hide Sidebar", "toggle-sidebar", key: "b")
         command(view, "Downloads", "downloads", key: "l", mods: [.command, .option])
+        command(view, "Developer Tools", "devtools", key: "i", mods: [.command, .option])
         view.addItem(.separator())
         func zoom(_ title: String, _ action: Selector, key: String, hidden: Bool = false) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)

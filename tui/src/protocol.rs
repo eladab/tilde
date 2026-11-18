@@ -69,6 +69,46 @@ pub enum Request {
     /// Put text on the system clipboard.
     #[serde(rename = "clipboard.set")]
     ClipboardSet { text: String },
+    /// Start capturing requests in every tab, and report those of one tab
+    /// (or of none, while the tab that is showing has no page).
+    #[serde(rename = "net.watch")]
+    NetWatch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tab_id: Option<u64>,
+    },
+    /// Stop capturing and forget what was captured.
+    #[serde(rename = "net.stop")]
+    NetStop,
+    /// Everything known about one request: headers and bodies.
+    #[serde(rename = "net.get")]
+    NetGet { tab_id: u64, request_id: u64 },
+    #[serde(rename = "net.clear")]
+    NetClear { tab_id: u64 },
+    /// Whether a tab's requests are kept when it goes to another page.
+    #[serde(rename = "net.preserve")]
+    NetPreserve { enabled: bool },
+    /// What the tab's profile stores: every site, every cookie, and the
+    /// storages of the page the tab is on.
+    #[serde(rename = "storage.get")]
+    StorageGet { tab_id: u64 },
+    /// Deletes one item (`cookie`, `local`, `session`, `indexeddb`, `cache`),
+    /// every item of that kind with `all`, or everything a `site` stores.
+    #[serde(rename = "storage.delete")]
+    StorageDelete {
+        tab_id: u64,
+        kind: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        site: Option<String>,
+        /// A cookie's name, a storage key, or a database's or cache's name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        domain: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+    },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -131,6 +171,142 @@ impl Download {
     }
 }
 
+/// One request of a page, as the list shows it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct NetRequest {
+    pub id: u64,
+    pub method: String,
+    pub url: String,
+    /// Zero while there is no answer, and for answers WebKit does not describe.
+    pub status: u16,
+    /// `doc`, `fetch`, `xhr`, `js`, `css`, `img`, `font`, `media`, `ws`, `ping` or `other`.
+    pub kind: String,
+    /// `pending`, `done` or `failed`.
+    pub state: String,
+    /// Bytes on the wire, when known.
+    pub size: Option<u64>,
+    /// It was answered from the cache, with nothing on the wire.
+    pub cached: bool,
+    /// Milliseconds, when known.
+    pub duration: Option<f64>,
+    /// Milliseconds since 1970.
+    pub started: f64,
+    pub mime: String,
+    pub error: Option<String>,
+}
+
+/// A message on a WebSocket.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct NetFrame {
+    /// Sent by the page, as opposed to received.
+    pub out: bool,
+    pub data: String,
+}
+
+/// Everything known about one request.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct NetRecord {
+    #[serde(flatten)]
+    pub request: NetRequest,
+    pub status_text: String,
+    pub protocol: String,
+    /// Size of the body once decoded, when known.
+    pub body_size: Option<u64>,
+    /// How much is known: `full` (seen by the page's own script call),
+    /// `document` (seen by the app) or `timing` (only what WebKit measures).
+    pub detail: String,
+    pub request_headers: Vec<(String, String)>,
+    pub request_body: Option<String>,
+    /// Said in place of a body that is not text.
+    pub request_note: Option<String>,
+    pub response_headers: Vec<(String, String)>,
+    pub response_body: Option<String>,
+    pub response_note: Option<String>,
+    pub response_truncated: bool,
+    pub frames: Vec<NetFrame>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Cookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    /// Seconds since 1970; absent for a cookie that ends with the session.
+    pub expires: Option<f64>,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: String,
+}
+
+/// A key of local or session storage.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct StorageItem {
+    pub key: String,
+    /// Cut short when `size` says it is longer.
+    pub value: String,
+    /// Length of the whole value, in characters.
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ObjectStore {
+    pub name: String,
+    pub count: u64,
+    /// The first records, as JSON text.
+    pub sample: Vec<StorageItem>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Database {
+    pub name: String,
+    pub version: u64,
+    pub stores: Vec<ObjectStore>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct CacheInfo {
+    pub name: String,
+    pub count: u64,
+    /// Addresses of the first entries.
+    pub urls: Vec<String>,
+}
+
+/// A site that has data in the profile.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Site {
+    /// The registrable domain, as WebKit groups data: `example.com`.
+    pub name: String,
+    /// What it stores besides cookies, in words: "Local Storage", "IndexedDB".
+    pub kinds: Vec<String>,
+}
+
+/// The reply to `storage.get`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct StorageData {
+    pub sites: Vec<Site>,
+    /// Every cookie of the profile.
+    pub cookies: Vec<Cookie>,
+    /// The origin of the tab's page; empty when it has none.
+    pub origin: String,
+    /// The site (as in `sites`) the tab's page belongs to.
+    pub site: String,
+    pub local: Vec<StorageItem>,
+    pub session: Vec<StorageItem>,
+    pub databases: Vec<Database>,
+    pub caches: Vec<CacheInfo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
@@ -162,6 +338,20 @@ pub enum Event {
     OpenUrl { url: String },
     #[serde(rename = "command")]
     Command { name: String, arg: Option<i64> },
+    /// Requests of the watched tab that are new or have changed. With
+    /// `reset`, they replace the list: the tab went to another page.
+    #[serde(rename = "net.updated")]
+    NetUpdated {
+        tab_id: u64,
+        #[serde(default)]
+        reset: bool,
+        /// The tab's page was loaded before recording began, so calls it
+        /// makes through its own reference to `fetch` are not seen.
+        #[serde(default)]
+        late: bool,
+        #[serde(default)]
+        requests: Vec<NetRequest>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -226,6 +416,18 @@ mod tests {
         );
         assert_eq!(enc(Request::FocusSet { mode: Mode::Page }), json!({"id": 5, "method": "focus.set", "mode": "page"}));
         assert_eq!(enc(Request::Shutdown), json!({"id": 5, "method": "shutdown"}));
+        assert_eq!(enc(Request::NetWatch { tab_id: Some(3) }), json!({"id": 5, "method": "net.watch", "tab_id": 3}));
+        assert_eq!(enc(Request::NetWatch { tab_id: None }), json!({"id": 5, "method": "net.watch"}));
+        assert_eq!(enc(Request::NetGet { tab_id: 3, request_id: 9 }), json!({"id": 5, "method": "net.get", "tab_id": 3, "request_id": 9}));
+        assert_eq!(enc(Request::StorageGet { tab_id: 3 }), json!({"id": 5, "method": "storage.get", "tab_id": 3}));
+        assert_eq!(
+            enc(Request::StorageDelete { tab_id: 3, kind: "cookie".into(), site: None, name: Some("sid".into()), domain: Some(".a.b".into()), path: Some("/".into()), all: false }),
+            json!({"id": 5, "method": "storage.delete", "tab_id": 3, "kind": "cookie", "name": "sid", "domain": ".a.b", "path": "/"})
+        );
+        assert_eq!(
+            enc(Request::StorageDelete { tab_id: 3, kind: "site".into(), site: Some("a.b".into()), name: None, domain: None, path: None, all: true }),
+            json!({"id": 5, "method": "storage.delete", "tab_id": 3, "kind": "site", "site": "a.b", "all": true})
+        );
     }
 
     #[test]
@@ -260,6 +462,23 @@ mod tests {
             Incoming::Event(Event::Command { name: "select-tab".into(), arg: Some(3) })
         );
         assert_eq!(decode(r#"{"event":"something.new","x":1}"#).unwrap(), Incoming::Event(Event::Unknown));
+
+        let e = decode(r#"{"event":"net.updated","tab_id":2,"requests":[{"id":4,"method":"GET","url":"https://a.b/","status":200,"kind":"doc","state":"done","size":120,"started":1.5,"later":true}]}"#).unwrap();
+        let Incoming::Event(Event::NetUpdated { tab_id, reset, requests, .. }) = e else { panic!() };
+        assert_eq!((tab_id, reset, requests.len()), (2, false, 1));
+        assert_eq!((requests[0].status, requests[0].size, requests[0].duration), (200, Some(120), None));
+    }
+
+    #[test]
+    fn decodes_a_request_in_full() {
+        let record: NetRecord = serde_json::from_value(json!({
+            "id": 4, "url": "https://a.b/", "status": 200, "status_text": "OK", "detail": "full",
+            "request_headers": [["Accept", "*/*"]], "response_body": "{}", "frames": [{"out": true, "data": "hi"}]
+        }))
+        .unwrap();
+        assert_eq!((record.request.id, record.request.status, record.status_text.as_str()), (4, 200, "OK"));
+        assert_eq!(record.request_headers, vec![("Accept".to_string(), "*/*".to_string())]);
+        assert_eq!(record.frames[0], NetFrame { out: true, data: "hi".into() });
     }
 
     #[test]

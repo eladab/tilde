@@ -70,6 +70,8 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     weak var delegate: TabStoreDelegate?
     /// Given every download a page starts, before it has a destination.
     var onDownload: ((WKDownload) -> Void)?
+    /// Told of every navigation while the dev tools are recording requests.
+    var monitor: NetworkMonitor?
     private(set) var tabs: [TabID: Tab] = [:]
     private var order: [TabID] = []
     private var nextID: TabID = 1
@@ -92,7 +94,16 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         configuration.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15"
         configuration.preferences.isElementFullscreenEnabled = true
         configurations[name] = configuration
+        monitor?.install(on: configuration.userContentController)
         return configuration
+    }
+
+    /// One per profile: where scripts for that profile's pages are installed.
+    var userContentControllers: [WKUserContentController] {
+        var seen: [WKUserContentController] = []
+        let all = configurations.values.map(\.userContentController) + tabs.values.map(\.webView.configuration.userContentController)
+        for controller in all where !seen.contains(where: { $0 === controller }) { seen.append(controller) }
+        return seen
     }
 
     var orderedTabs: [Tab] { order.compactMap { tabs[$0] } }
@@ -136,6 +147,7 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func close(_ id: TabID) {
         guard let tab = tabs.removeValue(forKey: id) else { return }
+        monitor?.tabClosed(id)
         order.removeAll { $0 == id }
         dirty.remove(id)
         tab.observations.forEach { $0.invalidate() }
@@ -185,6 +197,7 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
             delegate?.tabStore(self, didCreate: tab, opener: opener, url: url.absoluteString, background: true)
             return decisionHandler(.cancel)
         }
+        if let monitor, let tab = tab(for: webView) { monitor.willNavigate(tab, action: action) }
         decisionHandler(.allow)
     }
 
@@ -193,7 +206,9 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         let disposition = (response.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
         let attachment = disposition.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("attachment")
         // What WebKit cannot show, and what the server says to save, is downloaded.
-        decisionHandler(!response.canShowMIMEType || attachment ? .download : .allow)
+        let download = !response.canShowMIMEType || attachment
+        if let monitor, let tab = tab(for: webView) { monitor.didRespond(tab, response: response, shown: !download) }
+        decisionHandler(download ? .download : .allow)
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
@@ -217,7 +232,13 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        if let tab = tab(for: webView) { markDirty(tab.id) }
+        guard let tab = tab(for: webView) else { return }
+        markDirty(tab.id)
+        monitor?.didCommit(tab)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if let monitor, let tab = tab(for: webView) { monitor.didFinish(tab) }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -230,6 +251,7 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         Log.write("navigation failed: \(error.localizedDescription)")
+        if let monitor, let tab = tab(for: webView) { monitor.didFail(tab, url: webView.url, error: error, errorPage: false) }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -239,6 +261,7 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         if nsError.domain == "WebKitErrorDomain" && nsError.code == 102 { return } // frame load interrupted
         let failingURL = (nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL)
             ?? (nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String).flatMap(URL.init(string:))
+        if let monitor, let tab = tab(for: webView) { monitor.didFail(tab, url: failingURL, error: error, errorPage: true) }
         let html = Self.errorPage(message: nsError.localizedDescription, url: failingURL?.absoluteString ?? "")
         if let failingURL {
             // Keeps the failed address as the tab's URL, so reload retries it.

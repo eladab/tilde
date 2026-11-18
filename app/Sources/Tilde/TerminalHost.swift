@@ -35,6 +35,8 @@ protocol TerminalHost: AnyObject {
     func display(_ text: String)
     /// Deliver bytes to the child as if typed.
     func type(_ text: String)
+    /// The text on screen, a line per row, for the end-to-end tests.
+    func screenText() -> String
 }
 
 private final class TildeTerminalView: LocalProcessTerminalView {
@@ -118,6 +120,13 @@ final class SwiftTermHost: NSObject, TerminalHost, LocalProcessTerminalViewDeleg
     func type(_ text: String) {
         let bytes = Array(text.utf8)
         term.send(source: term, data: bytes[...])
+    }
+
+    func screenText() -> String {
+        // SwiftTerm publishes its text only as a selection.
+        term.selectAll()
+        defer { term.selectNone() }
+        return term.getSelection() ?? ""
     }
 
     // MARK: LocalProcessTerminalViewDelegate

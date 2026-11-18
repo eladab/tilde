@@ -106,6 +106,18 @@ pub fn short_date(time: u64) -> String {
     format!("{day} {}", &MONTHS[month as usize - 1][..3])
 }
 
+/// "14 Nov 2026"
+pub fn full_date(time: u64) -> String {
+    let (year, month, day) = civil(day_of(time));
+    format!("{day} {} {year}", &MONTHS[month as usize - 1][..3])
+}
+
+/// "14:05:09"
+pub fn clock_seconds(time: u64) -> String {
+    let secs = local(time).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs % 3600 / 60, secs % 60)
+}
+
 pub fn is_today(time: u64, now: u64) -> bool {
     day_of(time) == day_of(now)
 }

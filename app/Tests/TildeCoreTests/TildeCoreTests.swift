@@ -151,3 +151,143 @@ final class MigrationTests: XCTestCase {
         XCTAssertEqual(Migration.run(library: library), [])
     }
 }
+
+final class NetLogTests: XCTestCase {
+    private func start(_ number: Int, _ url: String, kind: String = "fetch") -> [String: Any] {
+        ["i": number, "p": ["kind": kind, "method": "GET", "url": url, "state": "pending", "started": 1000.0, "detail": "full"]]
+    }
+
+    func testAScriptsReportsBecomeOneRequest() {
+        let log = NetLog()
+        let first = log.apply(document: "a", messages: [start(1, "https://a.b/api")])
+        XCTAssertEqual(first.count, 1)
+        let id = first[0]
+        XCTAssertEqual(log.summary(id)?["state"] as? String, "pending")
+        let changed = log.apply(document: "a", messages: [
+            ["i": 1, "p": ["status": 404, "response_headers": [["content-type", "application/json"], ["bad"], [1, 2]]]],
+            ["i": 1, "p": ["state": "done", "duration": 12.5, "response_body": "{}"]],
+        ])
+        XCTAssertEqual(changed, [id])
+        XCTAssertEqual(log.count, 1)
+        let full = log.full(id)!
+        XCTAssertEqual(full["status"] as? Int, 404)
+        XCTAssertEqual(full["status_text"] as? String, "Not Found", "HTTP/2 sends no reason, so the usual one is supplied")
+        XCTAssertEqual(full["response_headers"] as? [[String]], [["content-type", "application/json"]])
+        XCTAssertEqual(full["response_body"] as? String, "{}")
+        XCTAssertNil(log.summary(id)?["response_body"], "the list is not sent bodies")
+    }
+
+    func testTheSameNumberInAnotherDocumentIsAnotherRequest() {
+        let log = NetLog()
+        let a = log.apply(document: "a", messages: [start(1, "https://a.b/1")])
+        let b = log.apply(document: "b", messages: [start(1, "https://a.b/2")])
+        XCTAssertNotEqual(a, b)
+        XCTAssertEqual(log.count, 2)
+    }
+
+    func testWhatAPageSaysIsCheckedAndCutToSize() {
+        let log = NetLog()
+        let id = log.apply(document: "a", messages: [["i": 1, "p": [
+            "kind": "fetch", "url": "https://a.b/", "method": String(repeating: "X", count: 100),
+            "status": "200", "size": -5, "duration": Double.infinity, "made_up": "x",
+            "response_body": String(repeating: "y", count: NetLog.maxBody + 10),
+        ]]])[0]
+        let full = log.full(id)!
+        XCTAssertEqual((full["method"] as? String)?.count, 16)
+        XCTAssertNil(full["status"])
+        XCTAssertNil(full["size"])
+        XCTAssertNil(full["duration"])
+        XCTAssertNil(full["made_up"])
+        XCTAssertEqual((full["response_body"] as? String)?.count, NetLog.maxBody)
+        // A report without an address starts nothing.
+        XCTAssertEqual(log.apply(document: "a", messages: [["i": 2, "p": ["status": 200]]]), [])
+    }
+
+    func testWebKitsTimingIsKeptOverTheScripts() {
+        let log = NetLog()
+        let id = log.apply(document: "a", messages: [start(1, "https://a.b/api")])[0]
+        _ = log.apply(document: "a", messages: [["i": 1, "t": true, "p": ["duration": 80.0, "size": 512]]])
+        _ = log.apply(document: "a", messages: [["i": 1, "p": ["state": "done", "duration": 95.0]]])
+        XCTAssertEqual(log.summary(id)?["duration"] as? Double, 80.0)
+        XCTAssertEqual(log.summary(id)?["size"] as? Int, 512)
+        XCTAssertEqual(log.summary(id)?["state"] as? String, "done")
+    }
+
+    func testADocumentsTimingJoinsTheRequestTheAppRecorded() {
+        let log = NetLog()
+        let id = log.add(["kind": "doc", "method": "GET", "url": "https://a.b/", "status": 200, "state": "pending", "detail": "document"])
+        let changed = log.apply(document: "a", messages: [["i": 1, "t": true, "p": [
+            "kind": "doc", "method": "GET", "url": "https://a.b/", "duration": 140.0, "size": 9000, "state": "done", "detail": "timing",
+        ]]])
+        XCTAssertEqual(changed, [id])
+        XCTAssertEqual(log.count, 1)
+        let full = log.full(id)!
+        XCTAssertEqual(full["detail"] as? String, "document", "what the app saw is not replaced")
+        XCTAssertEqual(full["size"] as? Int, 9000)
+        // A page that was already loaded has only its timing to go by.
+        let other = log.apply(document: "a", messages: [["i": 2, "t": true, "p": ["kind": "doc", "url": "https://c.d/", "duration": 5.0]]])
+        XCTAssertEqual(log.count, 2)
+        XCTAssertNotEqual(other, [id])
+    }
+
+    func testThePageBeingLeftIsNotHeardAfterAReset() {
+        let log = NetLog()
+        _ = log.apply(document: "old", messages: [start(1, "https://a.b/1")])
+        log.reset()
+        XCTAssertEqual(log.count, 0)
+        XCTAssertEqual(log.apply(document: "old", messages: [start(2, "https://a.b/late")]), [])
+        XCTAssertEqual(log.apply(document: "new", messages: [start(1, "https://a.b/2")]).count, 1)
+        // Clearing by hand keeps listening to the same page.
+        log.clear()
+        XCTAssertEqual(log.apply(document: "new", messages: [start(2, "https://a.b/3")]).count, 1)
+    }
+
+    func testSocketMessagesAreKeptWithTheirSocket() {
+        let log = NetLog()
+        let id = log.apply(document: "a", messages: [start(1, "wss://a.b/live", kind: "ws")])[0]
+        _ = log.apply(document: "a", messages: [["i": 1, "f": ["out": true, "data": "hi"]], ["i": 1, "f": ["out": false, "data": "ho"]]])
+        let frames = log.full(id)?["frames"] as? [[String: Any]]
+        XCTAssertEqual(frames?.count, 2)
+        XCTAssertEqual(frames?[0]["out"] as? Bool, true)
+        XCTAssertEqual(frames?[1]["data"] as? String, "ho")
+    }
+
+    func testTheOldestRequestsMakeWay() {
+        let log = NetLog()
+        let first = log.add(["url": "https://a.b/0"])
+        for n in 1...NetLog.maxRecords { log.add(["url": "https://a.b/\(n)"]) }
+        XCTAssertEqual(log.count, NetLog.maxRecords)
+        XCTAssertNil(log.summary(first))
+    }
+}
+
+final class JSONSafeTests: XCTestCase {
+    func testOnlyWhatJSONCanCarryIsKept() {
+        let value: [String: Any] = ["text": "a", "n": 1.5, "flag": true, "date": Date(), "nan": Double.nan,
+                                    "list": ["b", Date(), ["deep": Data()]]]
+        let safe = Wire.jsonSafe(value) as? [String: Any]
+        XCTAssertEqual(safe?.keys.sorted(), ["flag", "list", "n", "text"])
+        XCTAssertEqual((safe?["list"] as? [Any])?.count, 2)
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(safe as Any))
+        // What is not JSON is answered with an empty object, not a crash.
+        XCTAssertEqual(Wire.encode(["date": Date()]), "{}")
+    }
+}
+
+final class SiteMatchTests: XCTestCase {
+    func testAHostBelongsToTheSiteItEndsIn() {
+        let names = ["example.com", "example.co.uk", "accounts.example.com"]
+        XCTAssertEqual(SiteMatch.site(for: "www.example.com", among: names), "example.com")
+        XCTAssertEqual(SiteMatch.site(for: "login.accounts.example.com", among: names), "accounts.example.com")
+        XCTAssertEqual(SiteMatch.site(for: "shop.example.co.uk", among: names), "example.co.uk")
+        XCTAssertEqual(SiteMatch.site(for: "notexample.com", among: names), "notexample.com")
+        XCTAssertEqual(SiteMatch.site(for: "www.fresh.dev", among: names), "fresh.dev")
+    }
+
+    func testCookieDomainsMayBeginWithADot() {
+        XCTAssertTrue(SiteMatch.belongs(".example.com", to: "example.com"))
+        XCTAssertTrue(SiteMatch.belongs("a.b.Example.com", to: "example.com"))
+        XCTAssertFalse(SiteMatch.belongs("badexample.com", to: "example.com"))
+        XCTAssertFalse(SiteMatch.belongs("example.com", to: ""))
+    }
+}

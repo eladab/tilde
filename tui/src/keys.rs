@@ -20,6 +20,7 @@ pub const NAV: &[(&str, &str)] = &[
     ("D", "Delete space"),
     ("y", "History, of every space"),
     ("d", "Downloads"),
+    ("I", "Dev tools: network and storage"),
     ("?", "This key reference"),
     ("q", "Quit"),
 ];
@@ -65,7 +66,73 @@ pub const ANYWHERE: &[(&str, &str)] = &[
     ("⌃1 … ⌃9", "Select space"),
     ("⌘Y", "History"),
     ("⌥⌘L", "Downloads"),
+    ("⌥⌘I", "Dev tools"),
     ("⌘/", "This key reference"),
     ("⌘-click", "Open link in a background tab"),
     ("⌘Q", "Quit"),
 ];
+
+/// The keys of the dev tools pane, shown along its bottom edge.
+pub const NET_LIST: &[(&str, &str)] = &[
+    ("j/k", "move"),
+    ("⏎", "details"),
+    ("f", "filter"),
+    ("/", "search"),
+    ("c", "copy"),
+    ("C", "curl"),
+    ("x", "clear"),
+    ("p", "keep"),
+    ("r", "reload"),
+    ("tab", "storage"),
+    ("m", "dock"),
+    ("-/+", "size"),
+    ("esc", "tabs"),
+    ("q", "close"),
+];
+
+pub const NET_DETAIL: &[(&str, &str)] = &[
+    ("j/k", "scroll"),
+    ("h/l", "part"),
+    ("J/K", "other request"),
+    ("c", "copy this part"),
+    ("C", "curl"),
+    ("esc", "list"),
+    ("q", "close"),
+];
+
+pub const STORAGE_LIST: &[(&str, &str)] = &[
+    ("j/k", "move"),
+    ("h/l", "kind"),
+    ("⏎", "details"),
+    ("s", "site"),
+    ("/", "search"),
+    ("c", "copy"),
+    ("x", "delete"),
+    ("X", "all"),
+    ("r", "refresh"),
+    ("tab", "network"),
+    ("m", "dock"),
+    ("-/+", "size"),
+    ("esc", "tabs"),
+    ("q", "close"),
+];
+
+pub const STORAGE_DETAIL: &[(&str, &str)] = &[
+    ("j/k", "scroll"),
+    ("J/K", "other item"),
+    ("c", "copy value"),
+    ("x", "delete"),
+    ("esc", "list"),
+    ("q", "close"),
+];
+
+pub const STORAGE_SITES: &[(&str, &str)] = &[
+    ("j/k", "move"),
+    ("⏎", "show its storage"),
+    ("/", "search"),
+    ("X", "delete all its data"),
+    ("r", "refresh"),
+    ("esc", "back"),
+];
+
+pub const DEV_SEARCH: &[(&str, &str)] = &[("⏎", "keep"), ("esc", "clear")];

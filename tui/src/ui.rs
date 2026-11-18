@@ -16,17 +16,17 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// The surfaces of the interface, all derived from the space's background tint.
 #[derive(Clone, Copy)]
-struct Palette {
+pub(crate) struct Palette {
     /// The page area and anything drawn in it.
-    bg: Color,
+    pub(crate) bg: Color,
     /// Sidebar and status line.
-    panel: Color,
+    pub(crate) panel: Color,
     /// Toolbar.
-    bar: Color,
+    pub(crate) bar: Color,
     /// A focused text field.
-    field: Color,
+    pub(crate) field: Color,
     /// The selected tab's row.
-    selected: Color,
+    pub(crate) selected: Color,
 }
 
 impl Palette {
@@ -38,20 +38,20 @@ impl Palette {
         Self { bg: Color::Rgb(r, g, b), panel: lift(7), bar: lift(15), field: lift(29), selected: lift(36) }
     }
 
-    fn of(app: &App) -> Self {
+    pub(crate) fn of(app: &App) -> Self {
         Self::new(app.theme().1)
     }
 }
 
-const TEXT: Color = Color::Rgb(220, 222, 228);
-const DIM: Color = Color::Rgb(120, 123, 137);
-const FAINT: Color = Color::Rgb(70, 72, 84);
-const ACCENT: Color = Color::Rgb(122, 162, 247);
-const GREEN: Color = Color::Rgb(158, 206, 106);
-const YELLOW: Color = Color::Rgb(224, 175, 104);
-const RED: Color = Color::Rgb(247, 118, 142);
+pub(crate) const TEXT: Color = Color::Rgb(220, 222, 228);
+pub(crate) const DIM: Color = Color::Rgb(120, 123, 137);
+pub(crate) const FAINT: Color = Color::Rgb(70, 72, 84);
+pub(crate) const ACCENT: Color = Color::Rgb(122, 162, 247);
+pub(crate) const GREEN: Color = Color::Rgb(158, 206, 106);
+pub(crate) const YELLOW: Color = Color::Rgb(224, 175, 104);
+pub(crate) const RED: Color = Color::Rgb(247, 118, 142);
 
-fn space_color(index: usize) -> Color {
+pub(crate) fn space_color(index: usize) -> Color {
     let (_, (r, g, b)) = COLORS[index % COLORS.len()];
     Color::Rgb(r, g, b)
 }
@@ -78,7 +78,7 @@ pub fn fit(text: &str, width: usize) -> String {
     out
 }
 
-fn fill(buf: &mut Buffer, rect: Rect, style: Style) {
+pub(crate) fn fill(buf: &mut Buffer, rect: Rect, style: Style) {
     for y in rect.y..rect.y + rect.height {
         for x in rect.x..rect.x + rect.width {
             buf[(x, y)].set_symbol(" ").set_style(style);
@@ -86,7 +86,7 @@ fn fill(buf: &mut Buffer, rect: Rect, style: Style) {
     }
 }
 
-fn put(buf: &mut Buffer, x: u16, y: u16, max_width: u16, text: &str, style: Style) {
+pub(crate) fn put(buf: &mut Buffer, x: u16, y: u16, max_width: u16, text: &str, style: Style) {
     if max_width == 0 {
         return;
     }
@@ -96,7 +96,6 @@ fn put(buf: &mut Buffer, x: u16, y: u16, max_width: u16, text: &str, style: Styl
 /// Draws the whole interface and returns where the text cursor belongs, if anywhere.
 pub fn draw(frame: &mut Frame, app: &App) -> Option<Position> {
     let area = frame.area();
-    let layout = app.layout;
     let buf = frame.buffer_mut();
     let p = Palette::of(app);
     fill(buf, area, Style::default().bg(p.bg).fg(TEXT));
@@ -104,8 +103,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> Option<Position> {
     draw_sidebar(buf, app);
     let cursor = draw_toolbar(buf, app);
     draw_viewport(buf, app);
+    let cursor = crate::devtools_ui::draw(buf, app, &p).or(cursor);
     draw_status(buf, app);
-    let _ = layout;
     cursor
 }
 
@@ -733,6 +732,8 @@ fn draw_status(buf: &mut Buffer, app: &App) {
     }
     fill(buf, bar, Style::default().bg(p.panel).fg(DIM));
     let (label, color) = match app.mode {
+        // The keys are the dev tools pane's.
+        Mode::Nav if app.dev_has_keys() && !app.overlay_open() && app.edit.is_none() => (" DEV ", YELLOW),
         Mode::Nav => (" NAV ", space_color(app.theme().0)),
         Mode::Page => (" PAGE ", GREEN),
     };
@@ -779,6 +780,14 @@ fn draw_status(buf: &mut Buffer, app: &App) {
         match edit.kind {
             EditKind::Url => "⏎ go   esc cancel",
             EditKind::Rename => "⏎ rename   esc cancel",
+        }
+    } else if app.dev_has_keys() && app.mode == Mode::Nav {
+        // The pane lists its own keys along its bottom edge.
+        ""
+    } else if app.dev.open {
+        match app.mode {
+            Mode::Nav => "j/k tabs   o url   I dev tools   ⏎ page   ? keys",
+            Mode::Page => "⌘. tabs   ⌥⌘I dev tools   ⌘L url   ⌘/ keys",
         }
     } else {
         match app.mode {

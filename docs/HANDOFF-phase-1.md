@@ -168,6 +168,13 @@ Requests (TUI → app):
 | `download.open` / `download.reveal` / `download.cancel` / `download.remove` | `download_id` | Open the file, show it in the Finder, stop it, take it off the list (added). `open` fails with a sentence for the user when the file is gone |
 | `download.clear` | | Takes every download that is not running off the list (added) |
 | `clipboard.set` | `text` | Puts text on the system clipboard (added). Sent in answer to the `copy` command, which the app emits for Cmd+C while the terminal has focus |
+| `net.watch` | `tab_id?` | Starts recording the requests of every tab and reporting those of this one (added, for the dev tools). Reply: `requests`, what the tab has made so far, and `late`, true when the tab's page was loaded before recording began and so is only recorded in part. Without `tab_id` recording goes on and nothing is reported |
+| `net.stop` | | Stops recording and forgets everything recorded (added) |
+| `net.get` | `tab_id`, `request_id` | Reply: `request`, everything known about one request: the fields of the list plus `status_text`, `protocol`, `body_size`, `detail` (`full`, `document` or `timing`: how much could be seen), `request_headers`, `request_body`, `request_note`, `response_headers`, `response_body`, `response_note`, `response_truncated`, `frames` (added) |
+| `net.clear` | `tab_id` | Forgets the tab's requests (added) |
+| `net.preserve` | `enabled: bool` | Whether requests are kept when a tab goes to another page (added) |
+| `storage.get` | `tab_id` | Answered once WebKit has been asked (added). Reply: `sites` (each `name` and `kinds`), `cookies` (every cookie of the tab's profile: `name`, `value`, `domain`, `path`, `expires?`, `secure`, `http_only`, `same_site`), and for the page the tab is on its `origin`, `site`, `local`, `session` (each `key`, `value`, `size`), `databases` and `caches` |
+| `storage.delete` | `tab_id`, `kind`, `name?`, `domain?`, `path?`, `site?`, `all?` | Deletes a `cookie`, a `local` or `session` key, an `indexeddb` database or a `cache` by `name`; with `all`, every one of that kind (cookies: of `site`); kind `site` deletes everything `site` stores (added) |
 | `shutdown` | | App quits cleanly |
 
 Events (app → TUI):
@@ -182,6 +189,7 @@ Events (app → TUI):
 | `download.updated` | the download's fields: one download started, progressed or ended (added) |
 | `downloads.changed` | `downloads`: the whole list, sent when downloads are taken off it (added) |
 | `command` | `name`, `arg?` (a menu shortcut) |
+| `net.updated` | `tab_id`, `requests`, `reset?`, `late`: requests of the watched tab that are new or changed, each `id`, `method`, `url`, `status`, `kind`, `state` (`pending`, `done`, `failed`), `size?`, `cached?`, `duration?`, `started`, `mime`, `error?`. With `reset` they replace the list: the tab went to another page (added) |
 
 URL bar input resolution: has a scheme → use as is; looks like a host
 (`localhost`, contains a dot and no spaces, or an IP) → prefix `https://`;
@@ -194,8 +202,9 @@ failed load shows an error page that keeps the failed address; stale sockets
 from crashed app processes are removed at launch.
 
 A second socket exists only when `TILDE_DEBUG_SOCKET` is set. It serves the
-`debug.*` requests used by `scripts/e2e.py` (state dump, typing, synthesised
-keys and clicks, page JavaScript, resize, killing a web process). It is not
+`debug.*` requests used by `scripts/e2e.py` (state dump, the terminal's text,
+typing, synthesised keys and clicks, page JavaScript, resize, killing a web
+process). It is not
 part of the protocol and the TUI never sees it.
 
 ## TUI

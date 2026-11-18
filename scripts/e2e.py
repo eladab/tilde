@@ -17,7 +17,7 @@ Needs network access and takes about a minute and a half. Run
     python3 scripts/e2e.py --background   # stays behind your windows; skips the
                                           # checks that need real focus (clicks)
 """
-import json, os, signal, socket, subprocess, sys, tempfile, time
+import base64, hashlib, http.server, json, os, signal, socket, subprocess, sys, tempfile, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE_APP = os.path.join(ROOT, "build/Tilde.app")
@@ -224,6 +224,188 @@ def wait_session(predicate, what, timeout=10):
             pass
         time.sleep(0.2)
     sys.exit("TIMEOUT waiting for session: " + what)
+
+
+def screen(d):
+    """The text the TUI has on screen."""
+    return d.call("debug.screen").get("text", "")
+
+
+def wait_screen(d, predicate, what, timeout=15):
+    end = time.time() + timeout
+    while time.time() < end:
+        text = screen(d)
+        if predicate(text):
+            return text
+        time.sleep(0.2)
+    print(screen(d))
+    sys.exit("TIMEOUT waiting for the screen: " + what)
+
+
+class DevToolsSite(http.server.BaseHTTPRequestHandler):
+    """A page that makes requests and stores things, for the dev tools to show."""
+    PAGE = b"""<!doctype html><title>devtools</title><body>dev tools test<img src="/pixel.png"><script>
+document.cookie = 'e2e_cookie=chocolate; path=/';
+localStorage.setItem('e2e_key', JSON.stringify({a: 1, list: [1, 2]}));
+localStorage.setItem('e2e_other', 'stays');
+sessionStorage.setItem('e2e_session', 'yes');
+indexedDB.open('e2e_db', 1).onupgradeneeded = (e) => e.target.result.createObjectStore('things', {keyPath: 'id'}).add({id: 1, name: 'first'});
+fetch('/api/echo?x=1', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Test': 'yes'}, body: JSON.stringify({hello: 'world'})})
+  .then((r) => r.json()).then((j) => { window.echoed = j.seen; });
+const x = new XMLHttpRequest(); x.open('GET', '/api/data?n=3'); x.send();
+fetch('/missing');
+// As libraries do: a reference to fetch taken while the page loads.
+window.keptFetch = window.fetch.bind(window);
+const ws = new WebSocket('ws://' + location.host + '/ws');
+ws.onopen = () => ws.send('ping-e2e');
+ws.onmessage = (e) => { window.wsGot = e.data + (ws instanceof WebSocket ? '' : ' (not a WebSocket)'); };
+</script>"""
+    # WebSockets need HTTP/1.1.
+    protocol_version = "HTTP/1.1"
+    # The smallest PNG there is: one transparent pixel.
+    PIXEL = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                          "0000000d49444154789c6300010000000500010d0a2db40000000049454e44ae426082")
+
+    def log_message(self, *args):
+        pass
+
+    def reply(self, code, kind, body, headers=()):
+        self.send_response(code)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in headers:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/":
+            self.reply(200, "text/html; charset=utf-8", self.PAGE, [("X-Served-By", "e2e")])
+        elif self.path == "/ws":
+            self.websocket()
+        elif self.path == "/pixel.png":
+            self.reply(200, "image/png", self.PIXEL)
+        elif self.path.startswith("/api/data"):
+            self.reply(200, "application/json", b'{"items":[1,2,3],"from":"xhr"}')
+        else:
+            self.reply(404, "text/plain", b"nothing here")
+
+    def websocket(self):
+        """Accepts the connection, sends back the first message, and waits for the end."""
+        key = self.headers.get("Sec-WebSocket-Key", "") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", base64.b64encode(hashlib.sha1(key.encode()).digest()).decode())
+        self.end_headers()
+        head = self.rfile.read(2)
+        mask = self.rfile.read(4)
+        text = bytes(b ^ mask[i % 4] for i, b in enumerate(self.rfile.read(head[1] & 0x7F)))
+        self.wfile.write(bytes([0x81, len(text)]) + text)
+        self.wfile.flush()
+        self.close_connection = True
+        self.rfile.read(2)
+
+    def do_POST(self):
+        sent = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        answer = json.dumps({"echo": json.loads(sent or b"null"), "seen": self.headers.get("X-Test")}).encode()
+        self.reply(200, "application/json", answer, [("Set-Cookie", "http_only_cookie=secret; HttpOnly; Path=/")])
+
+
+def devtools_checks(d):
+    """The dev tools pane, against a page served from this script."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), DevToolsSite)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    count = len(state(d)["tabs"])
+    open_tab(d, f"http://127.0.0.1:{port}/")
+    wait(d, lambda s: len(s["tabs"]) == count + 1 and active(s)["title"] == "devtools" and not active(s)["loading"], "dev tools test page")
+    for _ in range(50):
+        if js(d, "String(window.echoed)") == "yes":
+            break
+        time.sleep(0.2)
+    nav(d)
+    before = state(d)["viewport"]
+
+    typ(d, "I")
+    s = wait(d, lambda s: s["viewport"]["cols"] < before["cols"], "the page making room for the pane")
+    check("I opens dev tools beside the page, which stays on screen", frame_matches_cells(s) and s["web_hidden"] is False, str(s["web_frame"]))
+    text = wait_screen(d, lambda t: "pixel.png" in t and " DEV " in t, "requests the page had already made")
+    check("requests made before dev tools were opened are listed from WebKit's timings", "Network" in text and "Storage" in text)
+
+    check("a page loaded before dev tools opened says that a reload records it in full", "Loaded before dev tools opened" in text, text[:900])
+    native = "String(Function.prototype.toString.call(window.fetch).includes('[native code]'))"
+    check("fetch is only wrapped while dev tools are open", js(d, native) == "false", str(js(d, native)))
+
+    typ(d, "r")
+    text = wait_screen(d, lambda t: "echo?x=1" in t and "data?n=3" in t and "missing" in t and "pixel.png" in t, "requests after a reload")
+    # The pane is to the right of the last rule on each line.
+    panes = [line.split("│")[-1] for line in text.splitlines() if line.count("│") > 1]
+    row = lambda name: next((line for line in panes if name in line), "")
+    check("a reload lists the document, with its status", "200" in row(f"127.0.0.1:{port}/"), row(f"127.0.0.1:{port}/"))
+    check("a fetch is listed with its method and status", "200" in row("echo?x=1") and "POST" in row("echo?x=1"), row("echo?x=1"))
+    check("an XMLHttpRequest is listed", "200" in row("data?n=3"), row("data?n=3"))
+    check("a failed request shows its status", "404" in row("missing"), row("missing"))
+    check("after the reload the notice is gone", "Loaded before dev tools opened" not in text)
+    check("a WebSocket is listed, and still works for the page", "101" in row("ws") and js(d, "String(window.wsGot)") == "ping-e2e",
+          row("ws") + " / " + str(js(d, "String(window.wsGot)")))
+
+    typ(d, "/echo\r")
+    typ(d, "\r")
+    text = wait_screen(d, lambda t: "x-test" in t and "General" in t, "the request's headers")
+    check("a request's details show the headers its script set and the response's",
+          "application/json" in text and "Response headers" in text and "Request headers" in text, text[-600:])
+    typ(d, "l")
+    text = wait_screen(d, lambda t: "Query parameters" in t and '"hello"' in t, "the request's payload")
+    check("the payload shows the query and the body that was sent", '"world"' in text)
+    typ(d, "l")
+    text = wait_screen(d, lambda t: '"seen"' in t and '"echo"' in t, "the response body")
+    check("the response body is shown as the server sent it", '"yes"' in text)
+    typ(d, "\x1b"); typ(d, "\x1b")
+    # As libraries do, the page calls fetch through the reference it took while loading.
+    js(d, "keptFetch('/api/echo?kept=1', {method: 'POST', body: JSON.stringify({late: 'call'})}), 1")
+    wait_screen(d, lambda t: "echo?kept=1" in t, "a request through the kept reference")
+    # The details are still on the response, where the last request left them.
+    typ(d, "/kept\r"); typ(d, "\r")
+    text = wait_screen(d, lambda t: '"echo"' in t or "Only the timing" in t, "that request's response")
+    check("a fetch through a reference the page kept is recorded with its body", '"late"' in text and '"call"' in text, text[-500:])
+    typ(d, "\x1b"); typ(d, "\x1b")
+    typ(d, "/ws\r"); typ(d, "\r")
+    text = wait_screen(d, lambda t: "Messages (2)" in t, "the socket's messages")
+    check("a WebSocket's messages are shown, sent and received", "↑ ping-e2e" in text and "↓ ping-e2e" in text, text[-500:])
+    typ(d, "\x1b"); typ(d, "\x1b")
+
+    typ(d, "\t")
+    text = wait_screen(d, lambda t: "e2e_cookie" in t and "http_only_cookie" in t, "the site's cookies")
+    check("storage lists the site's cookies, including one scripts cannot read", "chocolate" in text and "secret" in text)
+    typ(d, "j"); typ(d, "\r")
+    text = wait_screen(d, lambda t: "HttpOnly" in t and "SameSite" in t, "a cookie's details")
+    check("a cookie's details say it is HttpOnly", any("HttpOnly" in line and "Yes" in line for line in text.splitlines()))
+    typ(d, "\x1b")
+    typ(d, "l")
+    wait_screen(d, lambda t: "e2e_key" in t and "e2e_other" in t, "local storage")
+    typ(d, "/e2e_key\r"); typ(d, "x")
+    for _ in range(25):
+        if js(d, "String(localStorage.getItem('e2e_key'))") == "null":
+            break
+        time.sleep(0.2)
+    check("x deletes a local storage key and leaves the others",
+          js(d, "String(localStorage.getItem('e2e_key'))") == "null" and js(d, "localStorage.getItem('e2e_other')") == "stays")
+    typ(d, "\x1b")
+    wait_screen(d, lambda t: "e2e_other" in t and "e2e_key" not in t, "the list without the deleted key")
+    typ(d, "l")
+    text = wait_screen(d, lambda t: "e2e_session" in t, "session storage")
+    typ(d, "l")
+    text = wait_screen(d, lambda t: "e2e_db" in t and "things" in t, "IndexedDB")
+    check("session storage and IndexedDB of the page are listed", "1 record" in text, text[-400:])
+
+    typ(d, "q")
+    s = wait(d, lambda s: s["viewport"] == before, "the page taking its room back")
+    check("q closes dev tools and the page takes the room back", frame_matches_cells(s))
+    check("closing dev tools gives the page its own fetch back", js(d, native) == "true", str(js(d, native)))
+    typ(d, "x")
+    wait(d, lambda s: len(s["tabs"]) == count, "the dev tools test tab closed")
+    server.shutdown()
 
 
 def open_tab(d, text):
@@ -553,6 +735,9 @@ def main():
         time.sleep(0.5)
     check("a video plays", playing)
     nav(d); typ(d, "x"); time.sleep(0.5)
+
+    # Dev tools: network and storage
+    devtools_checks(d)
 
     # Quit and restore
     time.sleep(1)

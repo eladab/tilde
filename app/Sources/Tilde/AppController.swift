@@ -92,6 +92,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     private var quitting = false
     private var responderObservation: NSKeyValueObservation?
     private let passwordFill = PasswordFill()
+    /// Records pages' requests while the dev tools are open.
+    private lazy var network = NetworkMonitor(store: store)
     private var updates: Updates?
     /// Addresses other apps asked us to open before the TUI could take them.
     private var urlsToOpen: [URL] = []
@@ -127,6 +129,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         Log.write("launch version \(Self.version)")
         store.delegate = self
         store.onDownload = { [weak self] download in self?.downloads.adopt(download) }
+        store.monitor = network
+        network.onUpdate = { [weak self] tab, reset, late, requests in
+            self?.emit("net.updated", ["tab_id": tab, "reset": reset, "late": late, "requests": requests])
+        }
         downloads.onUpdate = { [weak self] record in self?.emit("download.updated", record.wire) }
         downloads.onListChange = { [weak self] in
             guard let self else { return }
@@ -219,11 +225,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
         server.onLine = { [weak self] conn, line in
             guard let self, conn === self.tui else { return }
-            conn.send(self.handle(line: line, debug: false))
+            // Requests that have to wait for WebKit answer later, by themselves.
+            if let reply = self.handle(line: line, from: conn) { conn.send(reply) }
         }
         server.onDisconnect = { [weak self] conn in
             guard let self, conn === self.tui else { return }
             self.tui = nil
+            // Nothing is left to show the requests to.
+            self.network.stop()
             Log.write("tui disconnected")
         }
         do {
@@ -645,7 +654,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
 
     // MARK: Protocol
 
-    private func handle(line: String, debug: Bool) -> String {
+    /// Answers a request from the TUI. `nil` means the answer is sent to
+    /// `conn` later, when WebKit has given it.
+    private func handle(line: String, from conn: Connection) -> String? {
         let req: Wire.Request
         do {
             req = try Wire.decodeRequest(line)
@@ -655,7 +666,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
         let id = req.id
 
-        func withTab(_ body: (Tab) -> String) -> String {
+        func withTab(_ body: (Tab) -> String?) -> String? {
             guard let tabID = req.int("tab_id") else { return Wire.failure(id: id, "missing tab_id") }
             guard let tab = store.tab(tabID) else { return Wire.failure(id: id, "no such tab") }
             return body(tab)
@@ -787,6 +798,52 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             NSPasteboard.general.setString(text, forType: .string)
             return Wire.reply(id: id)
 
+        case "net.watch":
+            // Without a tab, requests are still recorded but none are reported.
+            let tabID = req.int("tab_id")
+            if let tabID, store.tab(tabID) == nil { return Wire.failure(id: id, "no such tab") }
+            network.start()
+            network.watched = tabID
+            return Wire.reply(id: id, ["requests": tabID.map(network.requests(of:)) ?? [],
+                                       "late": tabID.map(network.isLate) ?? false])
+
+        case "net.stop":
+            network.stop()
+            return Wire.reply(id: id)
+
+        case "net.get":
+            return withTab { tab in
+                guard let number = req.int("request_id"), let request = network.request(number, of: tab.id) else {
+                    return Wire.failure(id: id, "no such request")
+                }
+                return Wire.reply(id: id, ["request": request])
+            }
+
+        case "net.clear":
+            return withTab { tab in
+                network.clear(tab.id)
+                return Wire.reply(id: id)
+            }
+
+        case "net.preserve":
+            guard let enabled = req.bool("enabled") else { return Wire.failure(id: id, "missing enabled") }
+            network.preserve = enabled
+            return Wire.reply(id: id)
+
+        case "storage.get":
+            return withTab { tab in
+                StorageInspector.read(tab) { fields in conn.send(Wire.reply(id: id, fields)) }
+                return nil
+            }
+
+        case "storage.delete":
+            return withTab { tab in
+                StorageInspector.delete(tab, request: req) { problem in
+                    conn.send(problem.map { Wire.failure(id: id, $0) } ?? Wire.reply(id: id))
+                }
+                return nil
+            }
+
         case "shutdown":
             quitting = true
             DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -855,6 +912,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         case "debug.type":
             host.type(req.string("text") ?? "")
             conn.send(Wire.reply(id: id))
+
+        case "debug.screen":
+            conn.send(Wire.reply(id: id, ["text": host.screenText()]))
 
         case "debug.key":
             // Synthesises a key press through the normal AppKit dispatch path.

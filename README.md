@@ -11,7 +11,7 @@ scrolling, IME.
 
 > Status: phase 1 is built, plus spaces (separate sets of tabs with their own
 > colour and profile), pinned tabs, tab renaming, a sidebar toggle, downloads,
-> history and a key reference. See [docs/HANDOFF-phase-1.md](docs/HANDOFF-phase-1.md)
+> history, dev tools (network and storage) and a key reference. See [docs/HANDOFF-phase-1.md](docs/HANDOFF-phase-1.md)
 > for what is and is not verified.
 
 ```
@@ -164,6 +164,7 @@ In NAV mode:
 | `D` | Delete the space (asks first) |
 | `y` | History |
 | `d` | Downloads |
+| `I` | Dev tools: network and storage |
 | `?` | Key reference |
 | `q` | Quit |
 
@@ -173,7 +174,7 @@ forward, `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle tabs, `Cmd+1`…`Cmd+9` select on
 `Cmd+B` toggles the sidebar, `Cmd+Plus` and `Cmd+Minus` make the page larger
 and smaller (`Cmd+0` restores its actual size, and pinching on the trackpad
 zooms too), `Cmd+D` pins or unpins, `Cmd+Shift+H` returns to
-the pinned page, `Cmd+Y` shows the history, `Opt+Cmd+L` the downloads, `Cmd+/` the key reference, `Opt+Cmd+←` and `Opt+Cmd+→`
+the pinned page, `Cmd+Y` shows the history, `Opt+Cmd+L` the downloads, `Opt+Cmd+I` the dev tools, `Cmd+/` the key reference, `Opt+Cmd+←` and `Opt+Cmd+→`
 switch space, `Ctrl+1`…`Ctrl+9` select one, `Cmd+Shift+N` makes a new one.
 `Cmd+\` fills the focused page field from the macOS Passwords app: pick a login
 in the system picker, then its username or password.
@@ -281,6 +282,123 @@ The newest 10,000 visits are kept. There is no search yet.
 Both views take the place of the page, like the key reference, and a click on a
 line selects it (a second click opens it).
 
+### Dev tools
+
+`I` (or `Opt+Cmd+I`, from the page too) opens a pane beside the page with two
+tools, **Network** and **Storage**. The page stays on screen and stays usable:
+it is given the columns the pane does not take. While the pane has the keys
+the status line says `DEV`; `Esc` hands them back to the tabs without closing
+it, `I` takes them again, and `q` closes it.
+
+```
+│  ←  →  ↻   https://example.com/                                           │
+│                        │  Network   Storage             14 requests · 373 KB │
+│                        │  All  Fetch  Doc  JS  CSS  Img  Media  WS  Other    │
+│                        │ St       Name                        Size     Time  │
+│                        │▎200 GET  example.com/                18 KB   212 ms │
+│                        │ 200 GET  site.css?v=42             9.1 KB    38 ms  │
+│        the page        │  —  GET  logo.svg                   cache     0 ms  │
+│                        │ 200 POST search?q=terminal+brow…   1.9 KB   187 ms  │
+│                        │ 404 GET  notifications               96 B    45 ms  │
+│                        │ ERR GET  collect?e=pageview&t=1…        —   failed  │
+│                        │ ··· GET  feed?cursor=eyJvIjoyMH0        —  pending  │
+│                        │ j/k move   ⏎ details   f filter   / search   c copy │
+```
+
+| Key | Action |
+|---|---|
+| `Tab`, `1` / `2` | Switch between Network and Storage |
+| `j` / `k`, `g` / `G`, `Ctrl+D` / `Ctrl+U` | Move by line, to either end, by screenful |
+| `Enter` | Open the selected item's details; `Esc` goes back |
+| `/` | Search the list; `Esc` clears the search |
+| `c` (or `Cmd+C`) | Copy: a request's address or the part of it that is showing, a stored value |
+| `m` | Move the pane below the page, or back beside it |
+| `-` / `+` | Make the pane smaller / larger |
+| `Esc` | Give the keys back to the tabs |
+| `q` | Close the pane |
+
+A pane wide enough (below the page, in a wide window) shows the list and the
+selected item's details side by side. The mouse works too: click a tool, a
+filter, a line (twice to open it), and scroll. Where the pane sits and how
+large it is are saved in the session.
+
+**Network** lists the requests of the tab that is showing, in the order they
+began: status, method, name, type, size and time. Requests are recorded while
+the pane is open, for every tab, so switching tabs shows that tab's own list.
+Opening it on a page that has already loaded lists what the page fetched so
+far, by address and time only, and a notice above the list says so: press `r`
+to reload the page and record everything in full. Without the reload some
+later requests are recorded in full and some are not (see below). The list starts
+afresh when the tab goes to another page, unless `p` is on.
+
+| Key | Action |
+|---|---|
+| `f` / `F` | Next / previous filter: all, fetch and XHR, documents, scripts, styles, images, media, WebSockets, other |
+| `G` | Go to the newest request and stay on the newest as more arrive |
+| `h` / `l` (in the details) | Headers, payload, response |
+| `J` / `K` (in the details) | Next / previous request |
+| `C` | Copy the request as a `curl` command |
+| `x` | Clear the list |
+| `p` | Keep the list across pages |
+| `r` | Reload the page |
+
+The details have three parts. *Headers*: address, method, status, type, size,
+time and protocol, then the response and request headers. *Payload*: the query
+parameters, decoded, and the body that was sent (JSON is re-indented, form
+data is listed field by field). *Response*: the body, with JSON re-indented and
+coloured; for a WebSocket, its messages in both directions.
+
+How much is shown depends on how the request was made, because WebKit gives an
+app no way to watch a web view's traffic. Tilde puts the list together from
+three things it can see:
+
+| Request | What is shown |
+|---|---|
+| `fetch`, `XMLHttpRequest`, `WebSocket` | Everything the page's own script could see: the headers it set, the body it sent, status, response headers and the response body when it is text (the first 512 KB of it). A script that Tilde adds to pages while the pane is open records these |
+| The document of a page or frame | Status, response headers, type, size and time, from WebKit's navigation callbacks. Not its body |
+| Everything else (scripts, styles, images, fonts, media) | Address, time, and size when the server allows it to be measured, from WebKit's resource timings. No status, headers or body; `cache` in the size column means it was not fetched at all |
+
+Never shown: the headers WebKit adds itself (cookies, user agent, and the
+like), response headers a server on another origin does not expose to scripts,
+and requests made by workers, which are not listed at all.
+
+Nothing touches a page's requests while the pane is closed. The script that
+records `fetch`, `XMLHttpRequest` and `WebSocket` is added when the pane opens:
+to every page loaded from then on, at its start, and to the pages already
+there. Closing the pane takes it out again and gives each page its own
+functions back.
+
+That is why a page loaded before the pane opened is only recorded in part.
+Pages and their libraries keep their own reference to `fetch` as they load,
+and calls made through it go around a wrapper added afterwards; they are
+listed with their timing only. Reloading with the pane open records
+everything.
+
+**Storage** shows what one site stores in the space's profile: cookies, local
+storage, session storage, IndexedDB and Cache Storage. It opens on the site of
+the page in the tab and follows the tab. `s` lists every site that has stored
+anything in the profile, with how many cookies and what else; `Enter` there
+shows that site.
+
+| Key | Action |
+|---|---|
+| `h` / `l` | Previous / next kind of storage |
+| `s` | The list of sites; in it, `X` deletes everything a site stores (asks first) |
+| `J` / `K` (in the details) | Next / previous item |
+| `x` | Delete the selected cookie, key, database or cache |
+| `X` | Delete everything of this kind for the site (asks first) |
+| `r` | Read the storage again; it is also read again when the page has loaded |
+
+Cookies are complete for every site, `HttpOnly` ones included, with domain,
+path, expiry, `Secure` and `SameSite`; a value that is URL-encoded is shown
+decoded as well. The other kinds can only be read by a page of their own
+origin, so they are shown for the page in the tab (its top frame) and not for
+other sites, for which the pane says what WebKit reports them to hold. Session
+storage is the tab's own. IndexedDB shows each object store with its number of
+records and the first 25 of them; Cache Storage shows each cache with the
+addresses of its first 100 entries. Values are read-only: they can be copied
+and deleted, not edited.
+
 The key reference (`?`) is shown in the page area, since nothing can be drawn
 over the page; any key puts the page back.
 
@@ -301,7 +419,7 @@ Files: session, `history.json` and `downloads.json` in
 | 1 (built) | Foundation | App shell with embedded terminal, engine, TUI. Vertical tab list, URL bar, back/forward/reload, NAV/PAGE modes, session restore. See the handoff. |
 | 2 | Daily driver | Command palette, URL autocomplete from history, find in page, resuming downloads, JS dialogs / HTTP auth / file pickers, context menu actions, favicons in the sidebar, TUI popups over the page (page swapped for a still snapshot while they are open) |
 | 3 | Arc-style organisation | Folders, favourites, tab archiving, split view (several web views), peek windows, moving tabs between spaces, erasing a profile, multiple windows |
-| 4 | Power features | Content blocking (`WKContentRuleList`), userscripts / per-site styles, WebExtensions (`WKWebExtension`), reader mode, picture-in-picture, Web Inspector, passkeys and password autofill, themes and font configuration |
+| 4 | Power features | Content blocking (`WKContentRuleList`), userscripts / per-site styles, WebExtensions (`WKWebExtension`), reader mode, picture-in-picture, the rest of the dev tools (console, elements; full request capture through a local proxy), passkeys and password autofill, themes and font configuration |
 | 5 | Beyond the app | Running the TUI in the user's own terminal (overlay or in-band frame streaming), remote use |
 
 ## Repository layout
@@ -314,10 +432,10 @@ tilde/
 │   └── spike-notes.md       what the first spike established
 ├── app/                     Swift package → Tilde.app
 │   └── Sources/
-│       ├── TildeCore/        URL-bar resolution, wire format (unit tested)
-│       └── Tilde/            window, terminal host, tab store, socket server
+│       ├── TildeCore/        URL-bar resolution, wire format, request log (unit tested)
+│       └── Tilde/            window, terminal host, tab store, socket server, dev tools' network and storage
 ├── tui/                     Rust crate → tilde-tui
-│   └── src/                 app logic, views, history, drawing, protocol, mock engine
+│   └── src/                 app logic, views, history, dev tools, drawing, protocol, mock engine
 ├── scripts/                 bundle.sh, dmg.sh, release.sh, appcast.sh, test.sh, e2e.py, make-icon.sh
 ├── .github/workflows/       tests on every push; a release on every version tag
 └── justfile                 thin wrappers over scripts/

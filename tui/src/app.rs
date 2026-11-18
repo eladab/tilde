@@ -1,6 +1,7 @@
 //! Browser state and behaviour. No terminal I/O happens here: keys and engine
 //! messages come in, requests go out through a `Transport`.
 
+use crate::devtools::{self, DevTools, Dock};
 use crate::protocol::{self, Download, Event, Incoming, Mode, Request, Response, TabState};
 use crate::history::History;
 use crate::resolve::display_host;
@@ -166,7 +167,12 @@ impl UrlEdit {
         self.text.chars().count()
     }
 
-    fn insert(&mut self, s: &str) {
+    /// A field holding `text`, with the cursor at its end.
+    pub(crate) fn holding(text: &str) -> Self {
+        Self { text: text.to_string(), cursor: text.chars().count(), ..Default::default() }
+    }
+
+    pub(crate) fn insert(&mut self, s: &str) {
         if self.replace_on_type {
             self.text.clear();
             self.cursor = 0;
@@ -209,6 +215,54 @@ impl UrlEdit {
         }
         self.delete_range(start, self.cursor);
     }
+
+    /// Applies an editing key: typing, deleting, moving the cursor.
+    pub(crate) fn key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let len = self.len();
+        match key.code {
+            KeyCode::Char('u') if ctrl => {
+                self.text.clear();
+                self.cursor = 0;
+                self.replace_on_type = false;
+            }
+            KeyCode::Char('w') if ctrl => self.delete_word(),
+            KeyCode::Char('a') if ctrl => {
+                self.cursor = 0;
+                self.replace_on_type = false;
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.cursor = len;
+                self.replace_on_type = false;
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                self.replace_on_type = false;
+            }
+            KeyCode::End => {
+                self.cursor = len;
+                self.replace_on_type = false;
+            }
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                self.replace_on_type = false;
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(len);
+                self.replace_on_type = false;
+            }
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => {
+                self.replace_on_type = false;
+                if self.cursor < len {
+                    let at = self.cursor;
+                    self.delete_range(at, at + 1);
+                }
+            }
+            KeyCode::Char(c) if !ctrl => self.insert(&c.to_string()),
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -217,6 +271,12 @@ pub(crate) enum Pending {
     TabList,
     Create { key: u64 },
     DownloadList,
+    /// The requests of a tab the dev tools began to watch.
+    NetWatch { tab_id: Option<u64> },
+    NetDetail { tab_id: u64, request_id: u64 },
+    Storage { tab_id: u64 },
+    /// Something was deleted: a failure is reported, and the storage is read again.
+    StorageChanged,
     /// A failure is worth telling the user about.
     Notify,
     Plain,
@@ -234,11 +294,15 @@ pub struct ScreenLayout {
     pub reload: Rect,
     pub url: Rect,
     pub viewport: Rect,
+    /// The dev tools pane, taken out of the page area; empty while closed.
+    pub devtools: Rect,
     pub status: Rect,
 }
 
 impl ScreenLayout {
-    pub fn compute(area: Rect, sidebar_visible: bool) -> Self {
+    /// `dev` is where the dev tools pane is docked and what share of the
+    /// page area it takes, while it is open.
+    pub fn compute(area: Rect, sidebar_visible: bool, dev: Option<(Dock, u16)>) -> Self {
         let status_h = area.height.min(1);
         let main_h = area.height - status_h;
         let side_w = if sidebar_visible { SIDEBAR_WIDTH.min(area.width) } else { 0 };
@@ -255,6 +319,11 @@ impl ScreenLayout {
         let toolbar = Rect::new(right_x, area.y, right_w, toolbar_h);
         let button = |offset: u16| Rect::new(right_x + offset.min(right_w), area.y, 3.min(right_w.saturating_sub(offset)), toolbar_h);
         let url_x = 11.min(right_w);
+        let page = Rect::new(right_x, area.y + toolbar_h, right_w, main_h - toolbar_h);
+        let (viewport, devtools) = match dev {
+            Some((dock, percent)) => devtools::split_page(page, dock, percent),
+            None => (page, Rect::default()),
+        };
         Self {
             sidebar,
             tab_list,
@@ -264,7 +333,8 @@ impl ScreenLayout {
             forward: button(4),
             reload: button(7),
             url: Rect::new(right_x + url_x, area.y, right_w - url_x, toolbar_h),
-            viewport: Rect::new(right_x, area.y + toolbar_h, right_w, main_h - toolbar_h),
+            viewport,
+            devtools,
             status: Rect::new(area.x, area.y + main_h, area.width, status_h),
         }
     }
@@ -280,7 +350,7 @@ pub enum SideRow {
     Separator,
 }
 
-fn contains(rect: Rect, col: u16, row: u16) -> bool {
+pub(crate) fn contains(rect: Rect, col: u16, row: u16) -> bool {
     rect.width > 0 && rect.height > 0 && col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
@@ -328,6 +398,8 @@ pub struct App {
     pub history: History,
     /// A fixed clock, for tests.
     pub now_override: Option<u64>,
+    /// The Network and Storage pane beside or below the page.
+    pub dev: DevTools,
     pub session_dirty: bool,
     pub session_path: Option<PathBuf>,
 
@@ -378,6 +450,7 @@ impl App {
             downloads_unseen: false,
             history: session_path.as_deref().map(|p| History::load(&crate::history::path_beside(p))).unwrap_or_default(),
             now_override: None,
+            dev: DevTools::default(),
             session_dirty: false,
             session_path,
             transport,
@@ -417,8 +490,15 @@ impl App {
     }
 
     fn pump(&mut self) {
-        while let Some(line) = self.inbox.pop_front() {
-            self.dispatch(&line);
+        loop {
+            while let Some(line) = self.inbox.pop_front() {
+                self.dispatch(&line);
+            }
+            // What the dev tools need follows from the state just reached.
+            self.dev_sync();
+            if self.inbox.is_empty() {
+                break;
+            }
         }
     }
 
@@ -446,7 +526,7 @@ impl App {
         self.tabs.get(self.selected)
     }
 
-    fn current_tab_id(&self) -> Option<u64> {
+    pub(crate) fn current_tab_id(&self) -> Option<u64> {
         self.current().and_then(|t| t.tab_id)
     }
 
@@ -467,7 +547,8 @@ impl App {
 
     /// Called before every draw with the terminal size.
     pub fn set_area(&mut self, area: Rect) {
-        self.layout = ScreenLayout::compute(area, self.sidebar_visible);
+        let dev = self.dev.open.then_some((self.dev.dock, self.dev.percent));
+        self.layout = ScreenLayout::compute(area, self.sidebar_visible, dev);
         let viewport = self.layout.viewport;
         if self.viewport_sent != Some(viewport) && viewport.width > 0 && viewport.height > 0 {
             self.viewport_sent = Some(viewport);
@@ -483,6 +564,8 @@ impl App {
             self.list_height = self.layout.tab_list.height;
             self.clamp_scroll();
         }
+        self.dev_prepare();
+        self.pump();
     }
 
     /// Number of pinned tabs. They always come first in `tabs`.
@@ -549,6 +632,15 @@ impl App {
                     self.message = response.error;
                 }
             }
+            Pending::NetWatch { tab_id } => self.net_watched(tab_id, response),
+            Pending::NetDetail { tab_id, request_id } => self.net_detail_arrived(tab_id, request_id, response),
+            Pending::Storage { tab_id } => self.storage_arrived(tab_id, response),
+            Pending::StorageChanged => {
+                if !response.ok {
+                    self.message = response.error;
+                }
+                self.dev.storage.stale = true;
+            }
             Pending::TabList => {
                 let live: Vec<TabState> = serde_json::from_value(response.body["tabs"].clone()).unwrap_or_default();
                 let active = response.body["active"].as_u64();
@@ -607,8 +699,13 @@ impl App {
             Event::TabUpdated(state) => {
                 if let Some(index) = self.index_of_tab(state.tab_id) {
                     let old_title = self.tabs[index].title.clone();
+                    let was_loading = self.tabs[index].loading;
                     if self.tabs[index].apply(&state) {
                         self.session_dirty = true;
+                    }
+                    // What a page stores is read again once it has loaded.
+                    if index == self.selected && was_loading && !self.tabs[index].loading {
+                        self.dev.storage.stale = true;
                     }
                     self.track_visit(self.space, index, &state, &old_title);
                 } else if let Some((space, index)) = self.stashed_tab(state.tab_id) {
@@ -705,6 +802,7 @@ impl App {
                 }
             }
             Event::Command { name, arg } => self.on_command(&name, arg),
+            Event::NetUpdated { tab_id, reset, late, requests } => self.net_updated(tab_id, reset, late, requests),
             Event::Unknown => {}
         }
     }
@@ -715,8 +813,14 @@ impl App {
             // field is drawn by us, so Cmd+C copies what is in it.
             if let Some(text) = self.edit.as_ref().map(|e| e.text.clone()).filter(|t| !t.is_empty()) {
                 self.request(Request::ClipboardSet { text });
+            } else if self.dev_has_keys() {
+                self.dev_copy();
             }
             return;
+        }
+        if name == "devtools" {
+            // The pane sits beside whatever is in the page area, so nothing is dismissed.
+            return self.toggle_devtools();
         }
         match name {
             "downloads" => return self.toggle_view(View::Downloads),
@@ -1159,7 +1263,7 @@ impl App {
         }
     }
 
-    fn reload(&mut self) {
+    pub(crate) fn reload(&mut self) {
         let Some(entry) = self.current().cloned() else { return };
         let Some(tab_id) = entry.tab_id else { return };
         self.message = None;
@@ -1222,6 +1326,8 @@ impl App {
             self.handle_confirm_key(key);
         } else if self.edit.is_some() {
             self.handle_edit_key(key);
+        } else if self.dev_has_keys() {
+            self.handle_dev_key(key);
         } else {
             self.handle_nav_key(key);
         }
@@ -1251,6 +1357,7 @@ impl App {
             KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('d') => self.open_view(View::Downloads),
             KeyCode::Char('y') => self.open_view(View::History),
+            KeyCode::Char('I') => self.open_devtools(),
             KeyCode::Char('h') | KeyCode::Left => self.step_space(-1),
             KeyCode::Char('l') | KeyCode::Right => self.step_space(1),
             KeyCode::Char('N') => self.open_space_form(false),
@@ -1269,49 +1376,8 @@ impl App {
             KeyCode::Char('c') if ctrl => return self.cancel_edit(),
             _ => {}
         }
-        let Some(edit) = self.edit.as_mut() else { return };
-        let len = edit.len();
-        match key.code {
-            KeyCode::Char('u') if ctrl => {
-                edit.text.clear();
-                edit.cursor = 0;
-                edit.replace_on_type = false;
-            }
-            KeyCode::Char('w') if ctrl => edit.delete_word(),
-            KeyCode::Char('a') if ctrl => {
-                edit.cursor = 0;
-                edit.replace_on_type = false;
-            }
-            KeyCode::Char('e') if ctrl => {
-                edit.cursor = len;
-                edit.replace_on_type = false;
-            }
-            KeyCode::Home => {
-                edit.cursor = 0;
-                edit.replace_on_type = false;
-            }
-            KeyCode::End => {
-                edit.cursor = len;
-                edit.replace_on_type = false;
-            }
-            KeyCode::Left => {
-                edit.cursor = edit.cursor.saturating_sub(1);
-                edit.replace_on_type = false;
-            }
-            KeyCode::Right => {
-                edit.cursor = (edit.cursor + 1).min(len);
-                edit.replace_on_type = false;
-            }
-            KeyCode::Backspace => edit.backspace(),
-            KeyCode::Delete => {
-                edit.replace_on_type = false;
-                if edit.cursor < len {
-                    let at = edit.cursor;
-                    edit.delete_range(at, at + 1);
-                }
-            }
-            KeyCode::Char(c) if !ctrl => edit.insert(&c.to_string()),
-            _ => {}
+        if let Some(edit) = self.edit.as_mut() {
+            edit.key(key);
         }
     }
 
@@ -1320,12 +1386,22 @@ impl App {
             self.handle_paste_into_form(text);
         } else if let Some(edit) = self.edit.as_mut() {
             edit.insert(text);
+        } else if self.dev_has_keys() {
+            self.dev_paste(text);
         }
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let (col, row) = (mouse.column, mouse.row);
         let layout = self.layout;
+        if contains(layout.devtools, col, row) {
+            self.dev_mouse(mouse.kind, col, row);
+            return self.pump();
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // A click anywhere else gives the keys back to the tabs.
+            self.dev.focused = false;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if self.help => self.close_help(),
             // The status line's download notice leads to the downloads.

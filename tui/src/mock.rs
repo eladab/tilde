@@ -49,11 +49,109 @@ pub struct MockEngine {
     pub shut_down: bool,
     /// Every request received, for assertions.
     pub log: Vec<Value>,
+    /// The tab whose requests the dev tools watch; the outer `None` is "not capturing".
+    pub net_watch: Option<Option<u64>>,
+    /// Tabs that had their page before capturing began.
+    late: Vec<u64>,
+    cookies: Vec<Value>,
+    local: Vec<Value>,
+    session: Vec<Value>,
+}
+
+/// The requests a page at `url` is pretended to have made, in full.
+fn mock_requests(url: &str) -> Vec<Value> {
+    let origin = {
+        let host = url.split_once("://").map(|(_, r)| r).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or("");
+        format!("https://{host}")
+    };
+    let t0 = 1_800_000_000_000.0;
+    let json_headers = json!([["content-type", "application/json; charset=utf-8"], ["cache-control", "no-store"], ["x-request-id", "7f3c2a9e41d84b0c"]]);
+    let user = r#"{"id":4217,"name":"Ada Lovelace","email":"ada@example.com","roles":["admin","editor"],"active":true,"lastSeen":null,"plan":{"name":"team","seats":12}}"#;
+    vec![
+        json!({"id": 1, "method": "GET", "url": url, "status": 200, "status_text": "OK", "kind": "doc", "state": "done", "size": 18234, "body_size": 61250,
+            "duration": 212.0, "started": t0, "mime": "text/html", "protocol": "h2", "detail": "document",
+            "response_headers": [["content-type", "text/html; charset=utf-8"], ["content-encoding", "br"], ["server", "nginx"], ["strict-transport-security", "max-age=31536000; includeSubDomains"]],
+            "request_headers": [["Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"]]}),
+        json!({"id": 2, "method": "GET", "url": format!("{origin}/assets/site.css?v=42"), "status": 200, "kind": "css", "state": "done", "size": 9120, "body_size": 48211,
+            "duration": 38.0, "started": t0 + 230.0, "protocol": "h2", "detail": "timing"}),
+        json!({"id": 3, "method": "GET", "url": format!("{origin}/assets/app.js"), "status": 200, "kind": "js", "state": "done", "size": 84210, "body_size": 301224,
+            "duration": 96.0, "started": t0 + 232.0, "protocol": "h2", "detail": "timing"}),
+        json!({"id": 4, "method": "GET", "url": "https://fonts.example.net/inter/Inter-Regular.woff2", "status": 200, "kind": "font", "state": "done", "size": 46812,
+            "duration": 61.0, "started": t0 + 280.0, "protocol": "h3", "detail": "timing"}),
+        json!({"id": 14, "method": "GET", "url": format!("{origin}/images/logo.svg"), "kind": "img", "state": "done", "cached": true, "body_size": 4810,
+            "duration": 0.0, "started": t0 + 290.0, "detail": "timing"}),
+        json!({"id": 5, "method": "GET", "url": format!("{origin}/images/hero.webp"), "status": 200, "kind": "img", "state": "done", "size": 212044,
+            "duration": 143.0, "started": t0 + 300.0, "protocol": "h2", "detail": "timing"}),
+        json!({"id": 6, "method": "GET", "url": format!("{origin}/api/user/me"), "status": 200, "status_text": "OK", "kind": "fetch", "state": "done", "size": 412, "body_size": 163,
+            "duration": 84.0, "started": t0 + 410.0, "mime": "application/json", "protocol": "h2", "detail": "full",
+            "request_headers": [["Accept", "application/json"], ["Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0MjE3In0.c2lnbmF0dXJl"]],
+            "response_headers": json_headers, "response_body": user}),
+        json!({"id": 7, "method": "POST", "url": format!("{origin}/api/search?q=terminal+browser&page=1&lang=en"), "status": 200, "status_text": "OK", "kind": "fetch", "state": "done",
+            "size": 1893, "body_size": 5120, "duration": 187.0, "started": t0 + 640.0, "mime": "application/json", "protocol": "h2", "detail": "full",
+            "request_headers": [["Content-Type", "application/json"], ["X-CSRF-Token", "b1946ac92492d2347c6235b4d2611184"]],
+            "request_body": r#"{"query":"terminal browser","filters":{"lang":"en","safe":true},"limit":20}"#,
+            "response_headers": json_headers,
+            "response_body": r#"{"total":2,"took_ms":41,"results":[{"title":"Tilde","url":"https://github.com/eladab/tilde","score":0.98,"tags":["browser","tui"]},{"title":"WebKit","url":"https://webkit.org/","score":0.71,"tags":[]}],"next":null}"#}),
+        json!({"id": 8, "method": "POST", "url": format!("{origin}/login"), "status": 302, "status_text": "Found", "kind": "xhr", "state": "done", "size": 380,
+            "duration": 122.0, "started": t0 + 900.0, "protocol": "h2", "detail": "full",
+            "request_headers": [["Content-Type", "application/x-www-form-urlencoded"]], "request_body": "user=ada%40example.com&remember=on&next=%2Fdashboard",
+            "response_headers": [["location", "/dashboard"], ["set-cookie", "(not visible to scripts)"]]}),
+        json!({"id": 9, "method": "GET", "url": format!("{origin}/api/notifications"), "status": 404, "status_text": "Not Found", "kind": "fetch", "state": "done", "size": 96,
+            "duration": 45.0, "started": t0 + 1100.0, "mime": "application/json", "protocol": "h2", "detail": "full",
+            "response_headers": json_headers, "response_body": r#"{"error":"not_found","message":"No such endpoint"}"#}),
+        json!({"id": 10, "method": "GET", "url": "https://metrics.example.net/collect?e=pageview&t=1800000000", "status": 0, "kind": "fetch", "state": "failed",
+            "started": t0 + 1300.0, "detail": "full", "error": "Load failed", "request_headers": []}),
+        json!({"id": 11, "method": "GET", "url": format!("{origin}/api/export/report.csv"), "status": 500, "status_text": "Internal Server Error", "kind": "xhr", "state": "done",
+            "size": 210, "duration": 2140.0, "started": t0 + 1500.0, "mime": "text/plain", "detail": "full",
+            "response_headers": [["content-type", "text/plain"]], "response_body": "upstream timed out after 2000 ms\ntrace: 9d1f-22ab"}),
+        json!({"id": 12, "method": "GET", "url": format!("wss://{}/live", origin.trim_start_matches("https://")), "status": 101, "status_text": "Switching Protocols", "kind": "ws",
+            "state": "pending", "started": t0 + 1700.0, "detail": "full",
+            "frames": [{"out": true, "data": r#"{"type":"subscribe","channel":"updates"}"#}, {"out": false, "data": r#"{"type":"ack","channel":"updates"}"#}, {"out": false, "data": r#"{"type":"tick","n":1}"#}]}),
+        json!({"id": 13, "method": "GET", "url": format!("{origin}/api/feed?cursor=eyJvIjoyMH0"), "status": 0, "kind": "fetch", "state": "pending", "started": t0 + 2100.0, "detail": "full",
+            "request_headers": [["Accept", "application/json"]]}),
+    ]
+}
+
+/// The fields of a request that the list needs.
+fn summary(request: &Value) -> Value {
+    let mut out = json!({});
+    for key in ["id", "method", "url", "status", "kind", "state", "size", "cached", "duration", "started", "mime", "error"] {
+        if let Some(value) = request.get(key) {
+            out[key] = value.clone();
+        }
+    }
+    out
+}
+
+fn host_of(url: &str) -> String {
+    display_host(url).split(':').next().unwrap_or("").to_string()
 }
 
 impl MockEngine {
     pub fn new() -> Self {
-        Self { next_id: 1, mode: "nav", visible: true, ..Default::default() }
+        let cookie = |name: &str, value: &str, domain: &str, expires: Value, http_only: bool| {
+            json!({"name": name, "value": value, "domain": domain, "path": "/", "expires": expires, "secure": true, "http_only": http_only, "same_site": "lax"})
+        };
+        Self {
+            next_id: 1,
+            mode: "nav",
+            visible: true,
+            cookies: vec![
+                cookie("session", "s%3Aq8Zk1mW3.pL0v%2BXc9", "webkit.org", Value::Null, true),
+                cookie("theme", "dark", ".webkit.org", json!(1_900_000_000u64), false),
+                cookie("prefs", "%7B%22lang%22%3A%22en%22%2C%22beta%22%3Atrue%7D", ".webkit.org", json!(1_890_000_000u64), false),
+                cookie("_ga", "GA1.2.1234567890.1700000000", ".example.com", json!(1_860_000_000u64), false),
+                cookie("sid", "f3a9c1d2e4b5", "accounts.example.com", json!(1_000_000_000u64), true),
+                cookie("NID", "511=abcDEF123", ".search.example", json!(1_880_000_000u64), true),
+            ],
+            local: vec![
+                json!({"key": "settings", "value": r#"{"theme":"dark","sidebar":{"width":280,"collapsed":false},"recent":["/docs","/blog"]}"#, "size": 86}),
+                json!({"key": "onboarding.done", "value": "true", "size": 4}),
+                json!({"key": "draft:42", "value": "Dev tools in a terminal: the page stays on the left, the requests on the right.", "size": 78}),
+            ],
+            session: vec![json!({"key": "scroll:/", "value": "1280", "size": 4}), json!({"key": "csrf", "value": "b1946ac92492d2347c6235b4d2611184", "size": 32})],
+            ..Default::default()
+        }
     }
 
     #[cfg(test)]
@@ -162,6 +260,12 @@ impl MockEngine {
                             self.tabs[i].visit(url.clone());
                             out.push(ok(json!({"url": url})));
                             out.push(Self::updated(&self.tabs[i]));
+                            if self.net_watch == Some(Some(self.tabs[i].id)) {
+                                let requests: Vec<Value> = mock_requests(&url).iter().map(summary).collect();
+                                let id = self.tabs[i].id;
+                                self.late.retain(|t| *t != id);
+                                out.push(json!({"event": "net.updated", "tab_id": id, "reset": true, "requests": requests}).to_string());
+                            }
                         }
                         None => out.push(fail("empty input")),
                     },
@@ -179,6 +283,18 @@ impl MockEngine {
                         out.push(ok(json!({})));
                         out.push(Self::updated(&self.tabs[i]));
                     }
+                    "tab.reload" => {
+                        out.push(ok(json!({})));
+                        // A page loaded while capturing is recorded from its start.
+                        let id = self.tabs[i].id;
+                        if self.net_watch.is_some() {
+                            self.late.retain(|t| *t != id);
+                        }
+                        if self.net_watch == Some(Some(id)) {
+                            let requests: Vec<Value> = mock_requests(self.tabs[i].url()).iter().map(summary).collect();
+                            out.push(json!({"event": "net.updated", "tab_id": id, "reset": true, "late": false, "requests": requests}).to_string());
+                        }
+                    }
                     _ => out.push(ok(json!({}))),
                 }
             }
@@ -193,6 +309,75 @@ impl MockEngine {
                 }
             }
             "clipboard.set" => out.push(ok(json!({}))),
+            "net.watch" => {
+                let tab = req["tab_id"].as_u64();
+                if self.net_watch.is_none() {
+                    self.late = self.tabs.iter().map(|t| t.id).collect();
+                }
+                self.net_watch = Some(tab);
+                let requests: Vec<Value> = tab
+                    .and_then(|id| self.tabs.iter().find(|t| t.id == id))
+                    .map(|t| mock_requests(t.url()).iter().map(summary).collect())
+                    .unwrap_or_default();
+                out.push(ok(json!({"requests": requests, "late": tab.is_some_and(|id| self.late.contains(&id))})));
+            }
+            "net.stop" => {
+                self.net_watch = None;
+                self.late.clear();
+                out.push(ok(json!({})));
+            }
+            "net.get" => {
+                let wanted = req["request_id"].as_u64();
+                let found = tab_index.and_then(|i| mock_requests(self.tabs[i].url()).into_iter().find(|r| r["id"].as_u64() == wanted));
+                match found {
+                    Some(request) => out.push(ok(json!({"request": request}))),
+                    None => out.push(fail("no such request")),
+                }
+            }
+            "net.clear" | "net.preserve" => out.push(ok(json!({}))),
+            "storage.get" => {
+                let Some(i) = tab_index else {
+                    return vec![fail("no such tab")];
+                };
+                let host = host_of(self.tabs[i].url());
+                out.push(ok(json!({
+                    "sites": [
+                        {"name": "example.com", "kinds": ["Local Storage", "IndexedDB"]},
+                        {"name": "search.example", "kinds": []},
+                        {"name": host, "kinds": ["Local Storage", "Session Storage", "IndexedDB", "Cache Storage"]},
+                    ],
+                    "cookies": self.cookies,
+                    "origin": format!("https://{host}"),
+                    "site": host,
+                    "local": self.local,
+                    "session": self.session,
+                    "databases": [{"name": "offline", "version": 3, "stores": [
+                        {"name": "articles", "count": 128, "sample": [
+                            {"key": "1", "value": r#"{"id":1,"title":"Hello","read":true}"#, "size": 36},
+                            {"key": "2", "value": r#"{"id":2,"title":"Second post","read":false}"#, "size": 43}]},
+                        {"name": "queue", "count": 0, "sample": []}]}],
+                    "caches": [{"name": "static-v7", "count": 2, "urls": [format!("https://{host}/assets/app.js"), format!("https://{host}/assets/site.css")]}],
+                })));
+            }
+            "storage.delete" => {
+                let name = req["name"].as_str().unwrap_or("").to_string();
+                let all = req["all"].as_bool() == Some(true);
+                let site = req["site"].as_str().unwrap_or("").to_string();
+                let in_site = |cookie: &Value| {
+                    let domain = cookie["domain"].as_str().unwrap_or("").trim_start_matches('.').to_string();
+                    domain == site || domain.ends_with(&format!(".{site}"))
+                };
+                match req["kind"].as_str().unwrap_or("") {
+                    "cookie" | "site" if all => self.cookies.retain(|c| !in_site(c)),
+                    "cookie" => self.cookies.retain(|c| !(c["name"] == name.as_str() && c["domain"] == req["domain"])),
+                    "local" if all => self.local.clear(),
+                    "local" => self.local.retain(|item| item["key"] != name.as_str()),
+                    "session" if all => self.session.clear(),
+                    "session" => self.session.retain(|item| item["key"] != name.as_str()),
+                    _ => {}
+                }
+                out.push(ok(json!({})));
+            }
             "download.list" => out.push(ok(json!({"downloads": []}))),
             "download.open" | "download.reveal" | "download.cancel" | "download.remove" | "download.clear" => out.push(ok(json!({}))),
             "shutdown" => {

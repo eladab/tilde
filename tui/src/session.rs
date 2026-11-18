@@ -56,6 +56,10 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
+fn is_zero_u16(n: &u16) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     /// Identifies the app process that the `tab_id`s belong to.
@@ -66,6 +70,12 @@ pub struct Session {
     pub current: usize,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sidebar_hidden: bool,
+    /// The dev tools pane is docked below the page, not beside it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub devtools_below: bool,
+    /// The share of the page area the dev tools pane takes, in percent; 0 is the usual one.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub devtools_size: u16,
     /// Sessions written while spaces were called looms use that key.
     #[serde(default, alias = "looms")]
     pub spaces: Vec<SessionSpace>,

@@ -1,5 +1,9 @@
 mod app;
 mod art;
+mod devtools;
+#[cfg(test)]
+mod devtools_tests;
+mod devtools_ui;
 #[cfg(test)]
 mod app_tests;
 mod history;

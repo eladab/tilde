@@ -441,7 +441,15 @@ impl App {
                 }
             })
             .collect();
-        Session { instance: self.instance, current: self.space, sidebar_hidden: !self.sidebar_visible, spaces, ..Default::default() }
+        Session {
+            instance: self.instance,
+            current: self.space,
+            sidebar_hidden: !self.sidebar_visible,
+            devtools_below: self.dev.dock == crate::devtools::Dock::Bottom,
+            devtools_size: if self.dev.percent == 45 { 0 } else { self.dev.percent },
+            spaces,
+            ..Default::default()
+        }
     }
 
     /// Builds spaces and tabs from the session file and whatever the app still has loaded.
@@ -450,6 +458,12 @@ impl App {
         let same_instance = saved.instance.is_some() && saved.instance == self.instance;
         let mut unclaimed: Vec<TabState> = live;
         self.sidebar_visible = !saved.sidebar_hidden;
+        if saved.devtools_below {
+            self.dev.dock = crate::devtools::Dock::Bottom;
+        }
+        if saved.devtools_size != 0 {
+            self.dev.percent = saved.devtools_size.clamp(20, 80);
+        }
         let current = saved.current;
 
         let mut spaces = Vec::new();
