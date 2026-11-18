@@ -18,9 +18,23 @@ final class BrowserWindow: NSWindow {
         return true
     }
 
+    /// Called for Cmd+Delete while the terminal has the keyboard.
+    var onClearLine: (() -> Void)?
+
+    /// The terminal has no encoding for Cmd+Delete and drops it, so the TUI
+    /// is told to clear its text field. A focused page keeps the key.
+    private func handleClearLine(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 51 else { return false }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard flags == .command, !Self.isInsideWebView(firstResponder as? NSView) else { return false }
+        onClearLine?()
+        return true
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Before the web view sees it: a focused web view claims every key equivalent.
         if handleTabCycling(event) { return true }
+        if handleClearLine(event) { return true }
         if NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
@@ -173,6 +187,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         window.title = "Tilde"
         window.onCycleTabs = { [weak self] backwards in
             self?.emit("command", ["name": backwards ? "prev-tab" : "next-tab"])
+        }
+        window.onClearLine = { [weak self] in
+            self?.emit("command", ["name": "clear-line"])
         }
         window.delegate = self
         window.isReleasedWhenClosed = false

@@ -67,6 +67,9 @@ final class SwiftTermHost: NSObject, TerminalHost, LocalProcessTerminalViewDeleg
         term = TildeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
         term.font = font
+        // Rows a little taller than the font's own line, so the toolbar, the
+        // status line and the tabs have room to breathe.
+        term.lineSpacing = 1.15
         term.nativeBackgroundColor = NSColor(srgbRed: 0.09, green: 0.09, blue: 0.11, alpha: 1)
         term.nativeForegroundColor = NSColor(srgbRed: 0.86, green: 0.87, blue: 0.89, alpha: 1)
         term.processDelegate = self

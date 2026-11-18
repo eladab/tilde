@@ -23,7 +23,7 @@ use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableMouseCapture
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::crossterm::{cursor, execute};
 use ratatui::Terminal;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -44,6 +44,9 @@ pub fn log(message: &str) {
 
 #[cfg(test)]
 pub fn log(_message: &str) {}
+
+/// How long one frame of an animation is shown.
+const FRAME: Duration = Duration::from_millis(80);
 
 enum Input {
     Terminal(Event),
@@ -133,7 +136,7 @@ fn main() {
         default_hook(info);
     }));
 
-    if let Err(error) = run(transport, session_path, tx, rx) {
+    if let Err(error) = run(transport, session_path, !mock, tx, rx) {
         restore_terminal();
         log(&format!("fatal: {error}"));
         eprintln!("tilde-tui: {error}");
@@ -144,6 +147,8 @@ fn main() {
 fn run(
     transport: Box<dyn transport::Transport>,
     session_path: Option<std::path::PathBuf>,
+    // The terminal is Tilde's own, so its colours are ours to set.
+    own_terminal: bool,
     tx: mpsc::Sender<Input>,
     rx: mpsc::Receiver<Input>,
 ) -> io::Result<()> {
@@ -164,7 +169,18 @@ fn run(
     app.start();
 
     let mut last_save = Instant::now();
+    let started = Instant::now();
+    // The colour the terminal shows where there are no cells: the strip
+    // left over at the window's edges. It follows the space's background.
+    let mut edge = None;
     loop {
+        let background = ui::Palette::of(&app).bg;
+        if own_terminal && edge != Some(background) {
+            edge = Some(background);
+            if let ratatui::style::Color::Rgb(r, g, b) = background {
+                let _ = write!(io::stdout(), "\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x07");
+            }
+        }
         terminal.draw(|frame| {
             app.set_area(frame.area());
             if let Some(position) = ui::draw(frame, &app) {
@@ -176,10 +192,10 @@ fn run(
             break;
         }
 
-        // Wakes when a tab waiting to be opened is due, and at least every 250 ms.
-        let wait = app.deadline().map_or(Duration::from_millis(250), |at| {
-            at.saturating_duration_since(Instant::now()).min(Duration::from_millis(250))
-        });
+        // Wakes when a tab waiting to be opened is due, and at least every
+        // 250 ms, or for every frame while something is animated.
+        let idle = if app.animating() { FRAME } else { Duration::from_millis(250) };
+        let wait = app.deadline().map_or(idle, |at| at.saturating_duration_since(Instant::now()).min(idle));
         let mut next = rx.recv_timeout(wait).ok();
         while let Some(input) = next {
             match input {
@@ -202,6 +218,7 @@ fn run(
         }
 
         app.tick(Instant::now());
+        app.frame = (started.elapsed().as_millis() / FRAME.as_millis()) as usize;
 
         if (app.session_dirty || app.history.dirty) && last_save.elapsed() > Duration::from_millis(500) {
             app.save_session();

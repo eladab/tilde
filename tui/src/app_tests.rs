@@ -148,6 +148,26 @@ fn url_editing_keys() {
     press(&mut app, KeyCode::Home);
     type_text(&mut app, "x");
     assert_eq!(app.edit.as_ref().unwrap().text, "xabc ");
+    // Option+← and Option+→ arrive as Esc b and Esc f.
+    let alt = |app: &mut App, code| app.handle_key(KeyEvent::new(code, KeyModifiers::ALT));
+    command(&mut app, "clear-line");
+    assert_eq!(app.edit.as_ref().unwrap().text, "", "Cmd+Delete clears the field");
+    type_text(&mut app, "example.com/some path");
+    alt(&mut app, KeyCode::Char('b'));
+    assert_eq!(app.edit.as_ref().unwrap().cursor, 17);
+    alt(&mut app, KeyCode::Char('b'));
+    assert_eq!(app.edit.as_ref().unwrap().cursor, 12);
+    alt(&mut app, KeyCode::Char('f'));
+    assert_eq!(app.edit.as_ref().unwrap().cursor, 16);
+    alt(&mut app, KeyCode::Char('f'));
+    assert_eq!(app.edit.as_ref().unwrap().cursor, 21);
+    assert_eq!(app.edit.as_ref().unwrap().text, "example.com/some path", "moving by words types nothing");
+    alt(&mut app, KeyCode::Backspace);
+    assert_eq!(app.edit.as_ref().unwrap().text, "example.com/some ");
+    command(&mut app, "clear-line");
+    type_text(&mut app, "abc ");
+    press(&mut app, KeyCode::Home);
+    type_text(&mut app, "x");
     app.handle_paste("pasted\ntext");
     assert_eq!(app.edit.as_ref().unwrap().text, "xpastedtextabc ");
     command(&mut app, "copy");
@@ -1205,11 +1225,11 @@ fn the_screen_shows_the_space_its_pins_and_its_tabs() {
     println!("{screen}");
     let lines: Vec<&str> = screen.lines().collect();
     assert!(lines[0].starts_with(" ~/Home"), "the space's name heads the sidebar");
-    assert!(lines[1].starts_with(" ● ○"), "one dot per space, the current one filled");
+    assert!(lines[1].starts_with(" ● •"), "one dot per space, the current one the larger");
     assert!(lines[3].contains("Mail"), "pinned tabs come first");
-    assert!(lines[4].contains("──────"), "then the rule");
+    assert!(lines[4].contains("╌╌╌╌╌╌"), "then the rule");
     assert!(lines[5].contains("webkit.org") && lines[6].contains("a.example"));
-    assert!(lines[0].contains("https://b.example"), "the toolbar shows the address");
+    assert!(lines[0].contains("▐b.example") && !lines[0].contains("https://"), "the toolbar shows the address, site first");
     assert!(lines[15].contains("NAV") && lines[15].contains("3 tabs"));
 
     // With the sidebar hidden the status line says where you are.
@@ -1309,7 +1329,7 @@ fn a_space_has_a_background_and_art_that_preview_while_editing() {
     press(&mut app, KeyCode::Left);
     press(&mut app, KeyCode::Left);
     press(&mut app, KeyCode::Left);
-    assert_eq!(app.theme().1, 7, "the choice wraps round");
+    assert_eq!(app.theme().1, crate::art::BACKGROUNDS.len() - 1, "the choice wraps round");
     press(&mut app, KeyCode::Right);
     press(&mut app, KeyCode::Right);
     press(&mut app, KeyCode::Right);
@@ -1317,7 +1337,7 @@ fn a_space_has_a_background_and_art_that_preview_while_editing() {
     press(&mut app, KeyCode::Tab); // art
     assert_eq!(app.form.as_ref().unwrap().field, FormField::Art);
     press(&mut app, KeyCode::Left);
-    assert_eq!(app.theme().2, 5, "left of none is the last piece");
+    assert_eq!(app.theme().2, crate::art::ART.len(), "left of none is the last piece");
     press(&mut app, KeyCode::Right);
     press(&mut app, KeyCode::Right);
     assert_eq!(app.theme().2, 1);
@@ -1394,7 +1414,7 @@ fn backgrounds_and_art_survive_a_restart_per_space() {
         press(&mut app, KeyCode::Right); // plum
     }
     press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Left); // rocket
+    press(&mut app, KeyCode::Left); // the last piece
     press(&mut app, KeyCode::Enter);
     type_text(&mut app, "work.example");
     press(&mut app, KeyCode::Enter);
@@ -1402,13 +1422,13 @@ fn backgrounds_and_art_survive_a_restart_per_space() {
 
     let saved = session::load(&path).unwrap();
     assert_eq!((saved.spaces[0].background, saved.spaces[0].art), (0, 0));
-    assert_eq!((saved.spaces[1].background, saved.spaces[1].art), (5, 5));
+    assert_eq!((saved.spaces[1].background, saved.spaces[1].art), (5, crate::art::ART.len()));
     let text = std::fs::read_to_string(&path).unwrap();
     assert_eq!(text.matches("\"background\"").count(), 1, "the plain look is not written out");
 
     let fresh = Rc::new(RefCell::new(MockEngine::new()));
     let mut app = start_with(fresh, Some(path.clone()));
-    assert_eq!(app.theme(), (app.current_space().color, 5, 5));
+    assert_eq!(app.theme(), (app.current_space().color, 5, crate::art::ART.len()));
     key(&mut app, 'h');
     assert_eq!((app.theme().1, app.theme().2), (0, 0), "each space keeps its own look");
 
@@ -1575,7 +1595,15 @@ fn downloads_show_in_the_status_line_and_in_their_view() {
     app.handle_line(&download_event(2, "big.zip", "active", 10_000_000, 40_000_000));
     assert_eq!(app.download_notice(), Some(("↓ big.zip 25%".to_string(), false)));
     let screen = render(&mut app, 120, 16);
-    assert!(screen.lines().last().unwrap().contains("↓ big.zip 25%"), "the status line reports the download");
+    let status = screen.lines().last().unwrap();
+    assert!(status.contains("↓ big.zip ━━━━━━━━━━━━ 25%"), "the status line reports the download: {status}");
+    // The bar is a quarter full: three of its twelve cells are not the colour of the rest.
+    let at = status.chars().position(|c| c == '━').unwrap() as u16;
+    let bar = |app: &mut App, cell: u16| cell_colors(app, 120, 16, at + cell, 15).0;
+    assert_eq!(bar(&mut app, 1), bar(&mut app, 2));
+    assert_ne!(bar(&mut app, 2), bar(&mut app, 3), "the bar fills as the file arrives");
+    assert_eq!(bar(&mut app, 3), bar(&mut app, 11));
+    assert!(app.animating(), "a download in progress keeps the screen moving");
 
     key(&mut app, 'd');
     assert_eq!(app.view, Some(crate::views::View::Downloads));
@@ -1721,4 +1749,70 @@ fn stepping_past_unloaded_tabs_does_not_load_them() {
     app.select(1);
     assert_eq!(fresh.borrow().tab_ids().len(), 3);
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_loading_tab_has_a_spinner_that_moves() {
+    let (mut app, _engine) = three_tabs();
+    assert!(!app.animating(), "nothing moves while nothing loads");
+    app.tabs[app.selected].loading = true;
+    app.tabs[app.selected].progress = 0.5;
+    assert!(app.animating());
+    let row = app.side_rows().iter().position(|r| *r == SideRow::Tab(app.selected)).unwrap() as u16 + 3;
+    let first = cell_colors(&mut app, 90, 16, 1, row).2;
+    app.frame += 1;
+    let second = cell_colors(&mut app, 90, 16, 1, row).2;
+    assert!(crate::ui::SPINNER.contains(&first.as_str()) && crate::ui::SPINNER.contains(&second.as_str()));
+    assert_ne!(first, second, "each frame draws the next step of the spinner");
+    // Half of the row carries the trace of the page arriving.
+    assert_ne!(cell_colors(&mut app, 90, 16, 5, row).1, cell_colors(&mut app, 90, 16, 20, row).1);
+}
+
+/// `TILDE_UI_DUMP=dir cargo test dump_ui` writes the interface on every
+/// background as HTML, for looking at when designing.
+#[test]
+fn dump_ui() {
+    use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
+    use ratatui::Terminal;
+    let Some(dir) = std::env::var_os("TILDE_UI_DUMP") else { return };
+    let (mut app, _engine) = three_tabs();
+    key(&mut app, 'p');
+    app.now_override = Some(NOW);
+    app.handle_line(&download_event(2, "big.zip", "active", 14_000_000, 40_000_000));
+    app.tabs[1].loading = true;
+    app.tabs[1].progress = 0.6;
+    app.frame = 3;
+    let css = |c: Color| match c {
+        Color::Rgb(r, g, b) => format!("rgb({r},{g},{b})"),
+        Color::Black => "#000".to_string(),
+        _ => "inherit".to_string(),
+    };
+    let mut html = String::from("<meta charset=utf-8><body style='background:#888;margin:8px'>");
+    for background in 0..crate::art::BACKGROUNDS.len() {
+        app.spaces[app.space].background = background;
+        app.spaces[app.space].color = background % crate::spaces::COLORS.len();
+        app.spaces[app.space].art = 1 + background % crate::art::ART.len();
+        let (width, height) = (96, 20);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                app.set_area(frame.area());
+                crate::ui::draw(frame, &app);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        html.push_str("<pre style='font:13px/1.15 Menlo,monospace;margin:0 0 10px;display:inline-block'>");
+        for y in 0..height {
+            for x in 0..width {
+                let cell = &buffer[(x, y)];
+                let weight = if cell.modifier.contains(Modifier::BOLD) { "bold" } else { "normal" };
+                let symbol = cell.symbol().replace('&', "&amp;").replace('<', "&lt;");
+                html.push_str(&format!("<span style='color:{};background:{};font-weight:{weight}'>{symbol}</span>", css(cell.fg), css(cell.bg)));
+            }
+            html.push('\n');
+        }
+        html.push_str("</pre><br>");
+    }
+    std::fs::write(std::path::Path::new(&dir).join("ui.html"), html).unwrap();
 }

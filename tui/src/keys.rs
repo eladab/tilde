@@ -49,6 +49,8 @@ pub const ANYWHERE: &[(&str, &str)] = &[
     ("⌘.", "Switch between tabs and page"),
     ("⌘L", "Edit the address"),
     ("⌘C", "Copy the address while editing it"),
+    ("⌥← / ⌥→", "Move by words while typing"),
+    ("⌥⌫ / ⌘⌫", "Delete the word / the whole line while typing"),
     ("⌘T", "New tab"),
     ("⌘W", "Close tab"),
     ("⌘R", "Reload"),

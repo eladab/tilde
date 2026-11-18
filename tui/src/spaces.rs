@@ -281,7 +281,8 @@ impl App {
                 }
                 _ => {}
             },
-            KeyCode::Char(c) if !ctrl && !c.is_control() => match form.field {
+            // Option+← and Option+→ arrive as Alt+b and Alt+f: not text.
+            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) && !c.is_control() => match form.field {
                 FormField::Name if form.name.chars().count() < 40 => form.name.push(c),
                 FormField::Profile if form.profile.chars().count() < 40 => form.profile.push(c),
                 _ => {}

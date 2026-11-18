@@ -200,8 +200,9 @@ impl UrlEdit {
         }
     }
 
-    fn delete_word(&mut self) {
-        self.replace_on_type = false;
+    /// Where the word before the cursor starts. Words end at spaces and at
+    /// the `/` and `.` of an address.
+    fn word_start(&self) -> usize {
         let chars: Vec<char> = self.text.chars().collect();
         let mut start = self.cursor;
         while start > 0 && chars[start - 1] == ' ' {
@@ -213,14 +214,47 @@ impl UrlEdit {
         if start == self.cursor && start > 0 {
             start -= 1;
         }
-        self.delete_range(start, self.cursor);
+        start
+    }
+
+    /// Where the word after the cursor ends: the mirror of `word_start`.
+    fn word_end(&self) -> usize {
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut end = self.cursor;
+        while end < chars.len() && chars[end] == ' ' {
+            end += 1;
+        }
+        while end < chars.len() && !matches!(chars[end], ' ' | '/' | '.') {
+            end += 1;
+        }
+        if end == self.cursor && end < chars.len() {
+            end += 1;
+        }
+        end
+    }
+
+    fn delete_word(&mut self) {
+        self.replace_on_type = false;
+        self.delete_range(self.word_start(), self.cursor);
     }
 
     /// Applies an editing key: typing, deleting, moving the cursor.
     pub(crate) fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Option arrives as Alt. The terminal sends Option+← and Option+→ as
+        // the Emacs pair Esc b and Esc f.
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         let len = self.len();
         match key.code {
+            KeyCode::Left | KeyCode::Char('b') if alt => {
+                self.cursor = self.word_start();
+                self.replace_on_type = false;
+            }
+            KeyCode::Right | KeyCode::Char('f') if alt => {
+                self.cursor = self.word_end();
+                self.replace_on_type = false;
+            }
+            KeyCode::Backspace if alt => self.delete_word(),
             KeyCode::Char('u') if ctrl => {
                 self.text.clear();
                 self.cursor = 0;
@@ -259,7 +293,7 @@ impl UrlEdit {
                     self.delete_range(at, at + 1);
                 }
             }
-            KeyCode::Char(c) if !ctrl => self.insert(&c.to_string()),
+            KeyCode::Char(c) if !ctrl && !alt => self.insert(&c.to_string()),
             _ => {}
         }
     }
@@ -398,6 +432,8 @@ pub struct App {
     pub history: History,
     /// A fixed clock, for tests.
     pub now_override: Option<u64>,
+    /// Which frame of the animations to draw; the main loop advances it.
+    pub frame: usize,
     /// The Network and Storage pane beside or below the page.
     pub dev: DevTools,
     pub session_dirty: bool,
@@ -450,6 +486,7 @@ impl App {
             downloads_unseen: false,
             history: session_path.as_deref().map(|p| History::load(&crate::history::path_beside(p))).unwrap_or_default(),
             now_override: None,
+            frame: 0,
             dev: DevTools::default(),
             session_dirty: false,
             session_path,
@@ -818,6 +855,15 @@ impl App {
             }
             return;
         }
+        if name == "clear-line" {
+            // Cmd+Delete, which the terminal has no encoding for: it clears
+            // the text field being typed in, as Ctrl+U does.
+            let typing = self.form.is_some() || self.edit.is_some() || (self.dev.search.is_some() && self.dev_has_keys());
+            if typing && !self.help && self.view.is_none() && !self.confirm_delete {
+                self.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            }
+            return;
+        }
         if name == "devtools" {
             // The pane sits beside whatever is in the page area, so nothing is dismissed.
             return self.toggle_devtools();
@@ -970,6 +1016,11 @@ impl App {
     }
 
     /// When `tick` next has something to do, if it does.
+    /// Something on screen is moving: a spinner or a download's bar.
+    pub fn animating(&self) -> bool {
+        self.tabs.iter().any(|tab| tab.loading) || self.downloads.iter().any(|d| d.is_active())
+    }
+
     pub fn deadline(&self) -> Option<Instant> {
         self.load_due.map(|(_, at)| at)
     }
