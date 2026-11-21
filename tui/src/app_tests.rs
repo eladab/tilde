@@ -1816,3 +1816,50 @@ fn dump_ui() {
     }
     std::fs::write(std::path::Path::new(&dir).join("ui.html"), html).unwrap();
 }
+
+#[test]
+fn the_address_bar_completes_from_history() {
+    let (mut app, engine) = start();
+    app.history.visit("https://github.com/rust-lang/rust", "Rust", "Home", 1_000);
+    app.history.visit("http://plain.example/", "Plain", "Home", 2_000);
+    let rest = |app: &App| app.edit.as_ref().unwrap().completion.as_ref().map(|c| c.rest.clone());
+    key(&mut app, 't');
+    type_text(&mut app, "gi");
+    assert_eq!(rest(&app).as_deref(), Some("thub.com"));
+    assert!(render(&mut app, 80, 12).contains("▐github.com"), "the offer is shown after the typed text");
+    // Deleting refuses the offer without eating a typed character.
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!((app.edit.as_ref().unwrap().text.as_str(), rest(&app)), ("gi", None));
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!((app.edit.as_ref().unwrap().text.as_str(), rest(&app)), ("g", None));
+    // → takes it, and typing on completes pages of the site.
+    key(&mut app, 'i');
+    press(&mut app, KeyCode::Right);
+    assert_eq!((app.edit.as_ref().unwrap().text.as_str(), rest(&app)), ("github.com", None));
+    key(&mut app, '/');
+    assert_eq!(rest(&app).as_deref(), Some("rust-lang/rust"));
+    // Enter opens the offered page.
+    press(&mut app, KeyCode::Enter);
+    let sent = engine.borrow().log.iter().rev().find(|r| r["method"] == "tab.create").cloned().unwrap();
+    assert_eq!(sent["input"], "https://github.com/rust-lang/rust");
+    // A site only ever seen over http is spelled out when taken.
+    key(&mut app, 't');
+    type_text(&mut app, "pla");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.edit.as_ref().unwrap().text, "http://plain.example/");
+    // Pasting and searching are left alone.
+    command(&mut app, "clear-line");
+    app.handle_paste("gi");
+    assert_eq!(rest(&app), None);
+    command(&mut app, "clear-line");
+    type_text(&mut app, "gi t");
+    assert_eq!(rest(&app), None);
+}
+
+#[test]
+fn a_local_file_without_a_title_goes_by_its_name() {
+    let tab = crate::app::TabEntry { url: "file:///Users/me/Documents/report.pdf".into(), ..Default::default() };
+    assert_eq!(tab.label(), "report.pdf");
+    let tab = crate::app::TabEntry { url: "https://www.example.com/a.pdf".into(), ..Default::default() };
+    assert_eq!(tab.label(), "example.com");
+}

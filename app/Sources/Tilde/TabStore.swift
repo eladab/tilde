@@ -70,6 +70,8 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     weak var delegate: TabStoreDelegate?
     /// Given every download a page starts, before it has a destination.
     var onDownload: ((WKDownload) -> Void)?
+    /// Given a file a page hands over whole, with the name it suggests and where it came from.
+    var onSaveData: ((Data, String, URL?) -> Void)?
     /// Told of every navigation while the dev tools are recording requests.
     var monitor: NetworkMonitor?
     private(set) var tabs: [TabID: Tab] = [:]
@@ -284,6 +286,14 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     // MARK: WKUIDelegate
+
+    /// The save button WebKit lays over a PDF it is showing. WebKit has the
+    /// file already and offers it here; without this the button does nothing.
+    @objc(_webView:saveDataToFile:suggestedFilename:mimeType:originatingURL:)
+    func webView(_ webView: WKWebView, saveDataToFile data: Data, suggestedFilename: String, mimeType: String,
+                 originatingURL: URL?) {
+        onSaveData?(data, suggestedFilename, originatingURL ?? webView.url)
+    }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {

@@ -77,7 +77,13 @@ impl TabEntry {
         } else if !self.title.is_empty() {
             self.title.clone()
         } else if !self.url.is_empty() {
-            display_host(&self.url)
+            let host = display_host(&self.url);
+            if !host.is_empty() {
+                return host;
+            }
+            // A local file has no host: it goes by its file name.
+            let path = self.url.split(['?', '#']).next().unwrap_or(&self.url).trim_end_matches('/');
+            path.rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or(&self.url).to_string()
         } else {
             "New tab".to_string()
         }
@@ -156,6 +162,8 @@ pub struct UrlEdit {
     pub replace_on_type: bool,
     /// Entry to return to if a brand-new tab is cancelled.
     return_to: Option<u64>,
+    /// How the history would finish the typed address, shown after it.
+    pub completion: Option<crate::history::Completion>,
 }
 
 impl UrlEdit {
@@ -182,6 +190,17 @@ impl UrlEdit {
         let at = self.byte_index(self.cursor);
         self.text.insert_str(at, &clean);
         self.cursor += clean.chars().count();
+    }
+
+    /// Makes an offered completion part of the text.
+    fn accept(&mut self, completion: crate::history::Completion) {
+        // What is typed is opened over https, so a plain http address is spelled out.
+        if completion.url.starts_with("http://") {
+            self.text = completion.url;
+        } else {
+            self.text.push_str(&completion.rest);
+        }
+        self.cursor = self.len();
     }
 
     fn delete_range(&mut self, from: usize, to: usize) {
@@ -1082,7 +1101,7 @@ impl App {
         let cursor = text.chars().count();
         let replace_on_type = !text.is_empty();
         let return_to = self.edit.as_ref().and_then(|e| e.return_to);
-        self.edit = Some(UrlEdit { kind: EditKind::Url, text, cursor, replace_on_type, return_to });
+        self.edit = Some(UrlEdit { kind: EditKind::Url, text, cursor, replace_on_type, return_to, completion: None });
         self.message = None;
     }
 
@@ -1095,7 +1114,7 @@ impl App {
         }
         let text = entry.label();
         let cursor = text.chars().count();
-        self.edit = Some(UrlEdit { kind: EditKind::Rename, text, cursor, replace_on_type: true, return_to: None });
+        self.edit = Some(UrlEdit { kind: EditKind::Rename, text, cursor, replace_on_type: true, return_to: None, completion: None });
         self.message = None;
     }
 
@@ -1119,7 +1138,8 @@ impl App {
 
     fn submit_edit(&mut self) {
         let Some(edit) = self.edit.clone() else { return };
-        let input = edit.text.trim().to_string();
+        // Enter takes the offered completion along with what was typed.
+        let input = edit.completion.as_ref().map_or_else(|| edit.text.trim().to_string(), |c| c.url.clone());
         if edit.kind == EditKind::Rename {
             self.edit = None;
             if let Some(entry) = self.tabs.get_mut(self.selected) {
@@ -1427,8 +1447,22 @@ impl App {
             KeyCode::Char('c') if ctrl => return self.cancel_edit(),
             _ => {}
         }
-        if let Some(edit) = self.edit.as_mut() {
-            edit.key(key);
+        let Some(edit) = self.edit.as_mut() else { return };
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if let Some(completion) = edit.completion.take() {
+            match key.code {
+                // Moving on past the end takes the completion as typed.
+                KeyCode::Right | KeyCode::End | KeyCode::Tab if !alt => return edit.accept(completion),
+                KeyCode::Char('e' | 'f') if ctrl => return edit.accept(completion),
+                // Deleting removes the completion first, and it stays away.
+                KeyCode::Backspace if !alt && !ctrl => return,
+                _ => {}
+            }
+        }
+        edit.key(key);
+        let typed = matches!(key.code, KeyCode::Char(_)) && !ctrl && !alt;
+        if typed && edit.kind == EditKind::Url && edit.cursor == edit.len() {
+            edit.completion = self.history.complete(&edit.text);
         }
     }
 
@@ -1436,6 +1470,7 @@ impl App {
         if self.form.is_some() {
             self.handle_paste_into_form(text);
         } else if let Some(edit) = self.edit.as_mut() {
+            edit.completion = None;
             edit.insert(text);
         } else if self.dev_has_keys() {
             self.dev_paste(text);

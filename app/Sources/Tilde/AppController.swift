@@ -143,6 +143,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         Log.write("launch version \(Self.version)")
         store.delegate = self
         store.onDownload = { [weak self] download in self?.downloads.adopt(download) }
+        store.onSaveData = { [weak self] data, name, source in self?.downloads.save(data, suggestedFilename: name, from: source) }
         store.monitor = network
         network.onUpdate = { [weak self] tab, reset, late, requests in
             self?.emit("net.updated", ["tab_id": tab, "reset": reset, "late": late, "requests": requests])

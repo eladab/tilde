@@ -48,6 +48,29 @@ pub struct History {
     pub dirty: bool,
 }
 
+/// What the address bar offers to finish a typed address with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// The text that follows what was typed.
+    pub rest: String,
+    /// The address the completed text stands for.
+    pub url: String,
+}
+
+/// An address the way it is typed: without its scheme and `www.`.
+fn bare(url: &str) -> Option<&str> {
+    let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+    let after = if lower.starts_with("https://") {
+        &url[8..]
+    } else if lower.starts_with("http://") {
+        &url[7..]
+    } else {
+        return None;
+    };
+    let www = after.get(..4).is_some_and(|w| w.eq_ignore_ascii_case("www."));
+    Some(if www { &after[4..] } else { after })
+}
+
 /// Pages worth remembering: not blank pages, not `data:` payloads.
 pub fn recordable(url: &str) -> bool {
     let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase()).unwrap_or_default();
@@ -165,6 +188,40 @@ impl History {
     /// The visit at `index`, counting from the newest.
     pub fn get(&self, index: usize) -> Option<&Visit> {
         self.visits.len().checked_sub(index + 1).and_then(|i| self.visits.get(i))
+    }
+
+    /// Finishes a typed address from the pages visited before. Until a path
+    /// is typed the offer is a site; after that it is a page of that site.
+    /// Of several, the one visited most wins, then the one visited last.
+    pub fn complete(&self, typed: &str) -> Option<Completion> {
+        if typed.contains(char::is_whitespace) {
+            return None;
+        }
+        let typed = bare(typed).unwrap_or_else(|| bare(&format!("https://{typed}")).map_or(typed, |b| &typed[typed.len() - b.len()..]));
+        if typed.is_empty() {
+            return None;
+        }
+        let whole_page = typed.contains(['/', '?', '#']);
+        // Per candidate: how often it was visited, and the latest such visit.
+        let mut found: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+        for (index, visit) in self.visits.iter().enumerate() {
+            let Some(address) = bare(&visit.url) else { continue };
+            if !address.get(..typed.len()).is_some_and(|start| start.eq_ignore_ascii_case(typed)) {
+                continue;
+            }
+            let end = if whole_page { address.len() } else { address.find(['/', '?', '#']).unwrap_or(address.len()) };
+            if end <= typed.len() {
+                continue;
+            }
+            let entry = found.entry(address[..end].to_ascii_lowercase()).or_insert((0, index));
+            *entry = (entry.0 + 1, index);
+        }
+        let (_, &(_, latest)) = found.iter().max_by_key(|(_, score)| **score)?;
+        let url = &self.visits[latest].url;
+        let address = bare(url)?;
+        let end = if whole_page { address.len() } else { address.find(['/', '?', '#']).unwrap_or(address.len()) };
+        let url = if whole_page { url.clone() } else { format!("{}/", &url[..url.len() - address.len() + end]) };
+        Some(Completion { rest: address[typed.len()..end].to_string(), url })
     }
 
     /// Records a page. A page seen again on the same day moves to the top
@@ -296,6 +353,43 @@ mod tests {
     const DAY: u64 = 86_400;
     /// Saturday 14 November 2026, 15:00 UTC.
     const NOW: u64 = 1_794_668_400;
+
+    #[test]
+    fn completes_typed_addresses() {
+        let mut history = History::default();
+        for (i, url) in [
+            "https://github.com/",
+            "https://www.github.com/rust-lang/rust",
+            "https://github.com/rust-lang/cargo",
+            "https://github.com/rust-lang/rust",
+            "https://gitlab.com/",
+            "http://plain.example/page?x=1",
+            "file:///tmp/gift.html",
+        ]
+        .iter()
+        .enumerate()
+        {
+            history.visit(url, "", "Home", NOW + i as u64 * DAY);
+        }
+        let complete = |typed: &str| history.complete(typed).map(|c| (c.rest, c.url));
+        // The site visited most, though another was visited later.
+        assert_eq!(complete("gi"), Some(("thub.com".into(), "https://github.com/".into())));
+        assert_eq!(complete("GitL"), Some(("ab.com".into(), "https://gitlab.com/".into())));
+        assert_eq!(complete("www.gith"), Some(("ub.com".into(), "https://github.com/".into())));
+        assert_eq!(complete("https://gith"), Some(("ub.com".into(), "https://github.com/".into())));
+        // With a path typed, a page: here the one seen twice.
+        assert_eq!(complete("github.com/r"), Some(("ust-lang/rust".into(), "https://github.com/rust-lang/rust".into())));
+        // A site keeps the scheme it was visited with.
+        assert_eq!(complete("pl"), Some(("ain.example".into(), "http://plain.example/".into())));
+        assert_eq!(complete("plain.example/"), Some(("page?x=1".into(), "http://plain.example/page?x=1".into())));
+        // Nothing to add, nothing known, or not an address at all.
+        assert_eq!(complete("gitlab.com"), None);
+        assert_eq!(complete("zzz"), None);
+        assert_eq!(complete("git hub"), None);
+        assert_eq!(complete("gif"), None);
+        assert_eq!(complete(""), None);
+        assert_eq!(complete("https://"), None);
+    }
 
     #[test]
     fn dates_and_clock() {

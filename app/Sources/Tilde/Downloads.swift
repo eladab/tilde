@@ -99,6 +99,29 @@ final class DownloadStore: NSObject, WKDownloadDelegate {
         completionHandler(destination)
     }
 
+    /// Saves a file that arrived whole, such as a PDF the page was showing.
+    func save(_ data: Data, suggestedFilename: String, from source: URL?) {
+        var record = DownloadRecord(
+            id: nextID, url: Self.describe(source), filename: suggestedFilename, path: "", state: .done,
+            received: Int64(data.count), total: Int64(data.count), started: Date().timeIntervalSince1970, error: nil)
+        nextID += 1
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let destination = freeDestination(for: suggestedFilename)
+            record.filename = destination.lastPathComponent
+            record.path = destination.path
+            try data.write(to: destination, options: .atomic)
+        } catch {
+            record.state = .failed
+            record.error = error.localizedDescription
+        }
+        records.append(record)
+        trim()
+        Log.write("download \(record.id) \(record.state.rawValue): \(record.filename)")
+        save()
+        onUpdate?(record)
+    }
+
     private static func describe(_ url: URL?) -> String {
         guard let url else { return "" }
         let scheme = url.scheme?.lowercased() ?? ""

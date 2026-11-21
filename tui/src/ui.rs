@@ -450,6 +450,10 @@ fn draw_toolbar(buf: &mut Buffer, app: &App) -> Option<Position> {
                 Style::default().bg(p.field).fg(p.text)
             };
             buf.set_stringn(inner.x + 1, inner.y, &visible, text_w, style);
+            // What the history would add is shown ahead of the cursor, fainter.
+            if let Some(completion) = edit.completion.as_ref().filter(|_| edit.cursor >= chars.len() && used < text_w) {
+                put(buf, inner.x + 1 + used as u16, inner.y, (text_w - used) as u16, &completion.rest, Style::default().bg(p.field).fg(p.dim));
+            }
             let cursor_x = inner.x + 1 + width_of(&chars[start..edit.cursor.min(chars.len())]) as u16;
             Some(Position::new(cursor_x.min(inner.x + inner.width - 1), inner.y))
         }

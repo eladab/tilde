@@ -154,6 +154,13 @@ fn run(
 ) -> io::Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    if own_terminal {
+        // Left to itself the terminal lays out a row that begins with Hebrew
+        // or Arabic from the right edge, which throws a tab's name under the
+        // page. Rows stay left to right; the words in them still read
+        // correctly. Erasing gives every row the setting.
+        write!(io::stdout(), "\x1b[?2501l\x1b[2J")?;
+    }
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     std::thread::spawn(move || {
