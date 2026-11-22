@@ -412,6 +412,10 @@ pub struct App {
     pub selected: usize,
     pub mode: Mode,
     pub edit: Option<UrlEdit>,
+    /// The find bar, while it is open.
+    pub find: Option<crate::find::Find>,
+    /// What was last searched for, offered when the bar opens again.
+    pub last_find: String,
     pub message: Option<String>,
     pub should_quit: bool,
     /// Tabs are known and the UI reflects the engine.
@@ -483,6 +487,8 @@ impl App {
             selected: 0,
             mode: Mode::Nav,
             edit: None,
+            find: None,
+            last_find: String::new(),
             message: None,
             should_quit: false,
             ready: false,
@@ -552,6 +558,7 @@ impl App {
             }
             // What the dev tools need follows from the state just reached.
             self.dev_sync();
+            self.find_follows_tab();
             if self.inbox.is_empty() {
                 break;
             }
@@ -756,12 +763,16 @@ impl App {
                 if let Some(index) = self.index_of_tab(state.tab_id) {
                     let old_title = self.tabs[index].title.clone();
                     let was_loading = self.tabs[index].loading;
+                    let old_url = self.tabs[index].url.clone();
                     if self.tabs[index].apply(&state) {
                         self.session_dirty = true;
                     }
                     // What a page stores is read again once it has loaded.
                     if index == self.selected && was_loading && !self.tabs[index].loading {
                         self.dev.storage.stale = true;
+                    }
+                    if self.tabs[index].url != old_url {
+                        self.find_page_changed(state.tab_id);
                     }
                     self.track_visit(self.space, index, &state, &old_title);
                 } else if let Some((space, index)) = self.stashed_tab(state.tab_id) {
@@ -857,17 +868,19 @@ impl App {
                     self.open_in_new_tab(url, String::new());
                 }
             }
-            Event::Command { name, arg } => self.on_command(&name, arg),
+            Event::Command { name, arg, text } => self.on_command(&name, arg, text),
+            Event::FindResult { tab_id, text, count, index } => self.find_result(tab_id, &text, count, index),
             Event::NetUpdated { tab_id, reset, late, requests } => self.net_updated(tab_id, reset, late, requests),
             Event::Unknown => {}
         }
     }
 
-    fn on_command(&mut self, name: &str, arg: Option<i64>) {
+    fn on_command(&mut self, name: &str, arg: Option<i64>, text: Option<String>) {
         if name == "copy" {
             // The terminal has no selection of its own to copy: the text
             // field is drawn by us, so Cmd+C copies what is in it.
-            if let Some(text) = self.edit.as_ref().map(|e| e.text.clone()).filter(|t| !t.is_empty()) {
+            let field = self.edit.as_ref().or(self.find.as_ref().filter(|_| self.find_has_keys()).map(|f| &f.edit));
+            if let Some(text) = field.map(|e| e.text.clone()).filter(|t| !t.is_empty()) {
                 self.request(Request::ClipboardSet { text });
             } else if self.dev_has_keys() {
                 self.dev_copy();
@@ -877,7 +890,7 @@ impl App {
         if name == "clear-line" {
             // Cmd+Delete, which the terminal has no encoding for: it clears
             // the text field being typed in, as Ctrl+U does.
-            let typing = self.form.is_some() || self.edit.is_some() || (self.dev.search.is_some() && self.dev_has_keys());
+            let typing = self.form.is_some() || self.edit.is_some() || self.find_has_keys() || (self.dev.search.is_some() && self.dev_has_keys());
             if typing && !self.help && self.view.is_none() && !self.confirm_delete {
                 self.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
             }
@@ -898,6 +911,9 @@ impl App {
             self.close_overlays();
         }
         match name {
+            "find" => self.open_find(text.filter(|t| !t.trim().is_empty())),
+            "find-next" => self.find_step(false),
+            "find-prev" => self.find_step(true),
             "toggle-mode" => {
                 let target = if self.mode == Mode::Nav { Mode::Page } else { Mode::Nav };
                 self.request(Request::FocusSet { mode: target });
@@ -1397,6 +1413,8 @@ impl App {
             self.handle_confirm_key(key);
         } else if self.edit.is_some() {
             self.handle_edit_key(key);
+        } else if self.find_has_keys() {
+            self.handle_find_key(key);
         } else if self.dev_has_keys() {
             self.handle_dev_key(key);
         } else {
@@ -1472,6 +1490,8 @@ impl App {
         } else if let Some(edit) = self.edit.as_mut() {
             edit.completion = None;
             edit.insert(text);
+        } else if self.find_has_keys() {
+            self.find_paste(text);
         } else if self.dev_has_keys() {
             self.dev_paste(text);
         }

@@ -1863,3 +1863,48 @@ fn a_local_file_without_a_title_goes_by_its_name() {
     let tab = crate::app::TabEntry { url: "https://www.example.com/a.pdf".into(), ..Default::default() };
     assert_eq!(tab.label(), "example.com");
 }
+
+#[test]
+fn find_in_page() {
+    let (mut app, engine) = start();
+    open(&mut app, "a.example");
+    let sent = |method: &str| engine.borrow().log.iter().rev().find(|r| r["method"] == method).cloned().unwrap();
+    let result = |app: &App| app.find.as_ref().unwrap().result.map(|r| (r.index, r.count));
+    command(&mut app, "find");
+    assert!(app.find_has_keys(), "the bar takes the keys");
+    assert!(render(&mut app, 100, 12).contains(" FIND  ▐Find in page"));
+    type_text(&mut app, "fox");
+    assert_eq!((sent("find.set")["text"].as_str(), sent("find.set")["fresh"].as_bool()), (Some("fox"), Some(true)));
+    assert_eq!(result(&app), Some((1, 3)));
+    assert!(render(&mut app, 100, 12).contains("▐fox"));
+    assert!(render(&mut app, 100, 12).contains("1 of 3"));
+    // Enter and ↓ go on, ↑ goes back, and both wrap around.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!((result(&app), sent("find.set")["fresh"].as_bool()), (Some((2, 3)), Some(false)));
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    assert_eq!((result(&app), sent("find.set")["backwards"].as_bool()), (Some((3, 3)), Some(true)));
+    command(&mut app, "find-next");
+    assert_eq!(result(&app), Some((1, 3)));
+    // Nothing found is said, and an emptied field takes the marks off.
+    type_text(&mut app, "zzz");
+    assert!(render(&mut app, 100, 12).contains("No matches"));
+    command(&mut app, "clear-line");
+    assert_eq!((app.find.as_ref().unwrap().edit.text.as_str(), result(&app)), ("", None));
+    assert_eq!(engine.borrow().log.last().unwrap()["method"], "find.close");
+    // Esc closes; the text is remembered for the next time and for Cmd+G.
+    type_text(&mut app, "fox");
+    press(&mut app, KeyCode::Esc);
+    assert!(app.find.is_none());
+    assert_eq!(sent("find.close")["tab_id"], sent("find.set")["tab_id"]);
+    command(&mut app, "find-next");
+    assert_eq!(app.find.as_ref().unwrap().edit.text, "fox");
+    command(&mut app, "find");
+    assert!(app.find.as_ref().unwrap().edit.replace_on_type, "the old text is typed over");
+    // Cmd+E searches for what the page has selected.
+    app.handle_line(r#"{"event":"command","name":"find","text":"jumps"}"#);
+    assert_eq!((app.find.as_ref().unwrap().edit.text.as_str(), sent("find.set")["text"].as_str()), ("jumps", Some("jumps")));
+    // The bar belongs to its tab: going to another closes it.
+    command(&mut app, "new-tab");
+    assert!(app.find.is_none());
+}

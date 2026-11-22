@@ -217,8 +217,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Option<Position> {
     let cursor = draw_toolbar(buf, app);
     draw_viewport(buf, app);
     let cursor = crate::devtools_ui::draw(buf, app, &p).or(cursor);
-    draw_status(buf, app);
-    cursor
+    draw_status(buf, app).or(cursor)
 }
 
 fn draw_sidebar(buf: &mut Buffer, app: &App) {
@@ -970,13 +969,94 @@ fn draw_download_chip(buf: &mut Buffer, app: &App, p: &Palette, x: &mut u16, bar
     segment(buf, x, bar, &amount, chip.fg(p.text));
 }
 
-fn draw_status(buf: &mut Buffer, app: &App) {
+/// The find bar, in place of the status line: what is searched for, how
+/// many matches there are, and the keys that step through them.
+fn draw_find(buf: &mut Buffer, app: &App, find: &crate::find::Find, p: &Palette) -> Option<Position> {
+    let bar = app.layout.status;
+    let end = bar.x + bar.width;
+    let typing = app.find_has_keys();
+    let plain = Style::default().bg(p.panel);
+    let mut x = bar.x;
+    segment(buf, &mut x, bar, " FIND ", Style::default().bg(YELLOW).fg(Color::Black).add_modifier(Modifier::BOLD));
+    segment(buf, &mut x, bar, " ", plain);
+    let hint = if typing { "⏎ next   ↑ previous   esc close" } else { "⌘G next   ⇧⌘G previous   ⌘F edit" };
+    let hint_w = hint.width() as u16 + 1;
+    let room = end.saturating_sub(x);
+    // The field gives way to the count, and both come before the hints.
+    let field_w = room.saturating_sub(18).clamp(room.min(8), 44);
+    if field_w < 4 {
+        return None;
+    }
+    let field = Rect::new(x, bar.y, field_w, 1);
+    let well = if typing { p.field } else { mix(p.panel, p.field, 0.55) };
+    fill(buf, field, Style::default().bg(well).fg(p.text));
+    buf[(field.x, field.y)].set_symbol("▐").set_style(Style::default().fg(well).bg(p.panel));
+    buf[(field.x + field.width - 1, field.y)].set_symbol("▌").set_style(Style::default().fg(well).bg(p.panel));
+    let text_w = (field.width - 2) as usize;
+    let edit = &find.edit;
+    let chars: Vec<char> = edit.text.chars().collect();
+    let width_of = |slice: &[char]| slice.iter().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+    let at = edit.cursor.min(chars.len());
+    let mut start = 0;
+    while width_of(&chars[start..at]) >= text_w.max(1) {
+        start += 1;
+    }
+    let cursor = Position::new(field.x + 1 + width_of(&chars[start..at]) as u16, field.y);
+    if chars.is_empty() {
+        put(buf, field.x + 1, field.y, text_w as u16, "Find in page", Style::default().fg(p.faint).bg(well));
+    } else {
+        let visible: String = chars[start..].iter().collect();
+        let style = if edit.replace_on_type && typing {
+            Style::default().bg(ACCENT).fg(Color::Black)
+        } else {
+            Style::default().bg(well).fg(p.text)
+        };
+        buf.set_stringn(field.x + 1, field.y, &visible, text_w, style);
+    }
+    x = field.x + field.width;
+    if let Some(result) = find.result.filter(|_| !chars.is_empty()) {
+        let (note, color) = match (result.count, result.index) {
+            (0, _) => ("No matches".to_string(), p.red),
+            (count, _) if count < 0 => ("Found".to_string(), p.text),
+            (count, _) if count >= crate::find::LIMIT => (format!("{}+ matches", crate::find::LIMIT), p.text),
+            (count, 0) => (format!("{count} {}", if count == 1 { "match" } else { "matches" }), p.text),
+            (count, index) => (format!("{index} of {count}"), p.text),
+        };
+        segment(buf, &mut x, bar, &format!(" {note} "), plain.fg(color).add_modifier(Modifier::BOLD));
+    }
+    if x + hint_w < end {
+        draw_hints(buf, end - hint_w, bar.y, hint, p);
+    }
+    typing.then_some(cursor)
+}
+
+/// Key hints: each is a key and what it does, and the key stands out.
+fn draw_hints(buf: &mut Buffer, x: u16, y: u16, hint: &str, p: &Palette) {
+    let mut hx = x;
+    for (i, part) in hint.split("   ").enumerate() {
+        if i > 0 {
+            hx += 3;
+        }
+        let (key, what) = part.split_once(' ').unwrap_or((part, ""));
+        put(buf, hx, y, key.width() as u16, key, Style::default().bg(p.panel).fg(p.text));
+        hx += key.width() as u16;
+        if !what.is_empty() {
+            put(buf, hx + 1, y, what.width() as u16, what, Style::default().bg(p.panel).fg(p.dim));
+            hx += 1 + what.width() as u16;
+        }
+    }
+}
+
+fn draw_status(buf: &mut Buffer, app: &App) -> Option<Position> {
     let p = Palette::of(app);
     let bar = app.layout.status;
     if bar.width == 0 || bar.height == 0 {
-        return;
+        return None;
     }
     fill(buf, bar, Style::default().bg(p.panel).fg(p.dim));
+    if let Some(find) = app.find.as_ref().filter(|_| !app.overlay_open() && app.edit.is_none()) {
+        return draw_find(buf, app, find, &p);
+    }
     let (label, color) = match app.mode {
         // The keys are the dev tools pane's.
         Mode::Nav if app.dev_has_keys() && !app.overlay_open() && app.edit.is_none() => (" DEV ", YELLOW),
@@ -1044,19 +1124,9 @@ fn draw_status(buf: &mut Buffer, app: &App) {
     };
     let hint_w = hint.width() as u16 + 1;
     if x + hint_w + 1 < end {
-        // Each hint is a key and what it does: the key stands out.
-        let mut hx = end - hint_w;
-        for part in hint.split("   ") {
-            let (key, what) = part.split_once(' ').unwrap_or((part, ""));
-            put(buf, hx, bar.y, end.saturating_sub(hx), key, plain.fg(p.text));
-            hx += key.width() as u16;
-            if !what.is_empty() {
-                put(buf, hx + 1, bar.y, end.saturating_sub(hx + 1), what, plain.fg(p.dim));
-                hx += 1 + what.width() as u16;
-            }
-            hx += 3;
-        }
+        draw_hints(buf, end - hint_w, bar.y, hint, &p);
     }
+    None
 }
 
 #[cfg(test)]

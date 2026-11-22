@@ -6,6 +6,7 @@ mod devtools_tests;
 mod devtools_ui;
 #[cfg(test)]
 mod app_tests;
+mod find;
 mod history;
 mod keys;
 mod spaces;

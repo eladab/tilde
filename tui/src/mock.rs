@@ -40,6 +40,8 @@ impl MockTab {
 
 #[derive(Default)]
 pub struct MockEngine {
+    /// The match the last search stopped on.
+    find_index: u64,
     tabs: Vec<MockTab>,
     next_id: u64,
     pub active: Option<u64>,
@@ -376,6 +378,22 @@ impl MockEngine {
                     "session" => self.session.retain(|item| item["key"] != name.as_str()),
                     _ => {}
                 }
+                out.push(ok(json!({})));
+            }
+            "find.set" => {
+                // Every page has three matches of anything but "zzz".
+                let count = if req["text"].as_str().is_some_and(|t| t.contains("zzz")) { 0 } else { 3 };
+                self.find_index = match (count, req["fresh"] == true, req["backwards"] == true) {
+                    (0, _, _) => 0,
+                    (_, true, _) => self.find_index.max(1),
+                    (_, _, false) => self.find_index % 3 + 1,
+                    (_, _, true) => (self.find_index + 1) % 3 + 1,
+                };
+                out.push(ok(json!({})));
+                out.push(json!({"event": "find.result", "tab_id": req["tab_id"], "text": req["text"], "count": count, "index": self.find_index}).to_string());
+            }
+            "find.close" => {
+                self.find_index = 0;
                 out.push(ok(json!({})));
             }
             "download.list" => out.push(ok(json!({"downloads": []}))),

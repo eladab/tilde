@@ -17,6 +17,8 @@ final class Tab {
     /// Advances each time the tab is shown or left, so that work begun for an
     /// earlier turn can tell it is out of date.
     var turn = 0
+    /// Advances with each new text searched for in the page.
+    var findGeneration = 0
 
     init(id: TabID, webView: WKWebView) {
         self.id = id
@@ -72,6 +74,9 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     var onDownload: ((WKDownload) -> Void)?
     /// Given a file a page hands over whole, with the name it suggests and where it came from.
     var onSaveData: ((Data, String, URL?) -> Void)?
+    /// What a search in a tab found: the text, how many matches (-1 when that
+    /// is not known), and which of them the page is on, counting from 1.
+    var onFind: ((TabID, String, Int, Int) -> Void)?
     /// Told of every navigation while the dev tools are recording requests.
     var monitor: NetworkMonitor?
     private(set) var tabs: [TabID: Tab] = [:]
@@ -132,6 +137,7 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         // Pinch on the trackpad (and smart magnify) zooms the page.
         webView.allowsMagnification = true
         webView.isInspectable = true
+        watchFinds(in: webView)
         let id = tab.id
         let mark: () -> Void = { [weak self] in self?.markDirty(id) }
         tab.observations = [

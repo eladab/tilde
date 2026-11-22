@@ -53,6 +53,10 @@ enum MainMenu {
         command(file, "Open Location…", "edit-url", key: "l")
         file.addItem(.separator())
         command(file, "Close Tab", "close-tab", key: "w")
+        file.addItem(.separator())
+        let print = NSMenuItem(title: "Print…", action: #selector(AppController.printPage(_:)), keyEquivalent: "p")
+        print.target = target
+        file.addItem(print)
 
         let edit = submenu("Edit")
         standard(edit, "Undo", Selector(("undo:")), key: "z")
@@ -64,6 +68,18 @@ enum MainMenu {
         edit.addItem(copy)
         standard(edit, "Paste", #selector(NSText.paste(_:)), key: "v")
         standard(edit, "Select All", #selector(NSText.selectAll(_:)), key: "a")
+        edit.addItem(.separator())
+        let find = NSMenu(title: "Find")
+        let findItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        findItem.submenu = find
+        edit.addItem(findItem)
+        command(find, "Find…", "find", key: "f")
+        command(find, "Find Next", "find-next", key: "g")
+        // An uppercase key equivalent is how AppKit spells Shift for letters.
+        command(find, "Find Previous", "find-prev", key: "G")
+        let useSelection = NSMenuItem(title: "Use Selection for Find", action: #selector(AppController.findSelection(_:)), keyEquivalent: "e")
+        useSelection.target = target
+        find.addItem(useSelection)
         edit.addItem(.separator())
         let fill = NSMenuItem(title: "Fill from Passwords…", action: #selector(AppController.fillFromPasswords(_:)), keyEquivalent: "\\")
         fill.target = target

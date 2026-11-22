@@ -109,6 +109,14 @@ pub enum Request {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         all: bool,
     },
+    /// Search the tab's page for `text` and go to the next match, or the
+    /// previous one. With `fresh` the text has changed, and the match the
+    /// page is on is kept if it still matches. The answer is `find.result`.
+    #[serde(rename = "find.set")]
+    FindSet { tab_id: u64, text: String, backwards: bool, fresh: bool },
+    /// Take the marks of the search off the tab's page.
+    #[serde(rename = "find.close")]
+    FindClose { tab_id: u64 },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -337,7 +345,25 @@ pub enum Event {
     #[serde(rename = "open-url")]
     OpenUrl { url: String },
     #[serde(rename = "command")]
-    Command { name: String, arg: Option<i64> },
+    Command {
+        name: String,
+        arg: Option<i64>,
+        /// For `find`: what to search for.
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// What a search found: how many matches (negative when not known) and
+    /// which of them the page is on, counting from 1.
+    #[serde(rename = "find.result")]
+    FindResult {
+        tab_id: u64,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        count: i64,
+        #[serde(default)]
+        index: u64,
+    },
     /// Requests of the watched tab that are new or have changed. With
     /// `reset`, they replace the list: the tab went to another page.
     #[serde(rename = "net.updated")]
@@ -459,7 +485,7 @@ mod tests {
         );
         assert_eq!(
             decode(r#"{"event":"command","name":"select-tab","arg":3}"#).unwrap(),
-            Incoming::Event(Event::Command { name: "select-tab".into(), arg: Some(3) })
+            Incoming::Event(Event::Command { name: "select-tab".into(), arg: Some(3), text: None })
         );
         assert_eq!(decode(r#"{"event":"something.new","x":1}"#).unwrap(), Incoming::Event(Event::Unknown));
 

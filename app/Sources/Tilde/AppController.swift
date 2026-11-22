@@ -144,6 +144,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         store.delegate = self
         store.onDownload = { [weak self] download in self?.downloads.adopt(download) }
         store.onSaveData = { [weak self] data, name, source in self?.downloads.save(data, suggestedFilename: name, from: source) }
+        store.onFind = { [weak self] tab, text, count, index in
+            self?.emit("find.result", ["tab_id": tab, "text": text, "count": count, "index": index])
+        }
         store.monitor = network
         network.onUpdate = { [weak self] tab, reset, late, requests in
             self?.emit("net.updated", ["tab_id": tab, "reset": reset, "late": late, "requests": requests])
@@ -204,7 +207,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         host.view.autoresizingMask = [.width, .height]
         container.addSubview(host.view)
 
-        applyResizeIncrements()
+        applySizeLimits()
         window.center()
 
         responderObservation = window.observe(\.firstResponder) { [weak self] _, _ in
@@ -212,10 +215,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
     }
 
-    private func applyResizeIncrements() {
+    private func applySizeLimits() {
         let cell = host.cellSize
-        window.contentResizeIncrements = cell
         window.contentMinSize = NSSize(width: cell.width * 80, height: cell.height * 24)
+    }
+
+    // The window grows by whole cells only while its edge is dragged. Were
+    // that always so, zooming or tiling it would stop a part of a cell short
+    // of the screen's edge.
+    func windowWillStartLiveResize(_ notification: Notification) {
+        window.contentResizeIncrements = host.cellSize
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        window.contentResizeIncrements = NSSize(width: 1, height: 1)
     }
 
     /// Removes sockets left behind by app processes that did not exit cleanly.
@@ -413,7 +426,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     func windowDidResize(_ notification: Notification) { applyViewport() }
 
     func windowDidChangeBackingProperties(_ notification: Notification) {
-        applyResizeIncrements()
+        applySizeLimits()
         applyViewport()
     }
 
@@ -588,6 +601,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         var fields: [String: Any] = ["name": command.name]
         if let arg = command.arg { fields["arg"] = arg }
         emit("command", fields)
+    }
+
+    /// Cmd+P: the system's print sheet for the page that is showing. The
+    /// sheet is where a printer is chosen, and where "Save as PDF" lives.
+    @objc func printPage(_ sender: Any?) {
+        guard let web = activeWebView, web.url != nil else { return NSSound.beep() }
+        let info = NSPrintInfo.shared.copy() as! NSPrintInfo
+        info.horizontalPagination = .fit
+        info.verticalPagination = .automatic
+        info.isHorizontallyCentered = false
+        info.isVerticallyCentered = false
+        let operation = web.printOperation(with: info)
+        // WebKit's print view comes without a size, and the sheet needs one for its preview.
+        operation.view?.frame = web.bounds
+        operation.jobTitle = web.title.flatMap { $0.isEmpty ? nil : $0 } ?? web.url?.lastPathComponent ?? "Tilde"
+        operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+    }
+
+    /// Cmd+E: searches the page for what is selected in it.
+    @objc func findSelection(_ sender: Any?) {
+        guard let web = activeWebView else { return }
+        web.evaluateJavaScript("String(getSelection())") { [weak self] result, _ in
+            // A search is for a word or a phrase, not for paragraphs.
+            let text = ((result as? String) ?? "").split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            self?.emit("command", ["name": "find", "text": String(text.prefix(200))])
+        }
     }
 
     /// Copy in the page is WebKit's. In the terminal the only text a user can
@@ -783,6 +823,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             }
         case "tab.stop":
             return withTab { tab in tab.webView.stopLoading(); return Wire.reply(id: id) }
+
+        case "find.set":
+            return withTab { tab in
+                store.find(tab, text: req.string("text") ?? "", backwards: req.bool("backwards") ?? false,
+                           fresh: req.bool("fresh") ?? false)
+                return Wire.reply(id: id)
+            }
+        case "find.close":
+            return withTab { tab in store.endFind(tab); return Wire.reply(id: id) }
 
         case "focus.set":
             guard let raw = req.string("mode"), let mode = Mode(rawValue: raw) else {
