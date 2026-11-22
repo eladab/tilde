@@ -27,11 +27,41 @@ jobs:
       - name: Unit tests
         run: ./scripts/test.sh
 
-      # Ad hoc: there is no Developer ID certificate here.
-      - name: Disk image
-        run: ./scripts/dmg.sh
+      # Releases are signed with a certificate of our own (see
+      # scripts/make-signing-cert.sh), so that what macOS was told to allow
+      # one version still holds for the next. Without the secrets the
+      # signature is ad hoc, and macOS asks again after every update.
+      - name: Signing certificate
         env:
-          TILDE_SIGN_IDENTITY: "-"
+          SIGNING_CERTIFICATE: ${{ secrets.SIGNING_CERTIFICATE }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_CERTIFICATE" ]; then
+            echo "::warning::no SIGNING_CERTIFICATE secret: signed ad hoc, so macOS will ask again for the keychain, the camera and the microphone after this update"
+            echo "TILDE_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 16)
+          echo "$SIGNING_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$SIGNING_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/signing.p12"
+          echo "TILDE_SIGN_IDENTITY=Tilde Release" >> "$GITHUB_ENV"
+
+      - name: Disk image
+        run: |
+          ./scripts/dmg.sh
+          # bundle.sh falls back to an ad-hoc signature when signing fails;
+          # a release must not do that quietly.
+          if [ "$TILDE_SIGN_IDENTITY" != "-" ]; then
+            codesign -d -r- build/Tilde.app 2>&1 | grep -q "certificate leaf" ||
+              { echo "::error::the app is not signed with the release certificate"; exit 1; }
+          fi
 
       - name: Update feed
         env:
