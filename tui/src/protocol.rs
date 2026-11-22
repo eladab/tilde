@@ -147,6 +147,10 @@ pub struct TabState {
     pub entry: Option<u64>,
     /// The address of the page the tab is on; `url` runs ahead while loading.
     pub entry_url: Option<String>,
+    /// The page holds the camera (muted or not).
+    pub camera: Option<bool>,
+    /// The page holds the microphone (muted or not).
+    pub microphone: Option<bool>,
 }
 
 /// A download, running or past, as the app reports it.

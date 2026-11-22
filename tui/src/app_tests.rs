@@ -1908,3 +1908,17 @@ fn find_in_page() {
     command(&mut app, "new-tab");
     assert!(app.find.is_none());
 }
+
+#[test]
+fn a_tab_using_the_camera_or_microphone_is_marked() {
+    let (mut app, _engine) = start();
+    open(&mut app, "meet.example");
+    let tab_id = app.current().unwrap().tab_id.unwrap();
+    assert!(!render(&mut app, 100, 12).contains("● mic"));
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{tab_id},"microphone":true}}"#));
+    assert!(render(&mut app, 100, 12).contains("● mic"));
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{tab_id},"camera":true}}"#));
+    assert!(render(&mut app, 100, 12).contains("● cam mic"));
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{tab_id},"camera":false,"microphone":false}}"#));
+    assert!(!render(&mut app, 100, 12).contains("● cam") && !render(&mut app, 100, 12).contains("● mic"));
+}

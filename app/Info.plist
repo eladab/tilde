@@ -59,6 +59,12 @@
     <string>https://github.com/eladab/tilde/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>k2ZxtZXSfWMXjRP8mROe0Gx1vHT+lHTxobhJZApH3OA=</string>
+    <!-- macOS asks once, in these words, before any page can be given the
+         camera or the microphone. Tilde then asks per site. -->
+    <key>NSCameraUsageDescription</key>
+    <string>Web pages you allow, such as video calls, can use the camera.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Web pages you allow, such as calls, can use the microphone.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

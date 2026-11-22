@@ -56,6 +56,9 @@ final class Tab {
             "progress": webView.estimatedProgress,
             "can_go_back": webView.canGoBack,
             "can_go_forward": webView.canGoForward,
+            // Muted devices count: the page still holds them.
+            "camera": webView.cameraCaptureState != .none,
+            "microphone": webView.microphoneCaptureState != .none,
         ]
     }
 }
@@ -74,6 +77,8 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     var onDownload: ((WKDownload) -> Void)?
     /// Given a file a page hands over whole, with the name it suggests and where it came from.
     var onSaveData: ((Data, String, URL?) -> Void)?
+    /// A page wants the camera or the microphone; the answer goes to the handler.
+    var onMediaRequest: ((WKSecurityOrigin, WKMediaCaptureType, @escaping (WKPermissionDecision) -> Void) -> Void)?
     /// What a search in a tab found: the text, how many matches (-1 when that
     /// is not known), and which of them the page is on, counting from 1.
     var onFind: ((TabID, String, Int, Int) -> Void)?
@@ -147,6 +152,8 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
             webView.observe(\.estimatedProgress) { _, _ in mark() },
             webView.observe(\.canGoBack) { _, _ in mark() },
             webView.observe(\.canGoForward) { _, _ in mark() },
+            webView.observe(\.cameraCaptureState) { _, _ in mark() },
+            webView.observe(\.microphoneCaptureState) { _, _ in mark() },
         ]
         tabs[id] = tab
         order.append(id)
@@ -310,6 +317,13 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         delegate?.tabStore(self, didCreate: tab, opener: opener,
                            url: action.request.url?.absoluteString ?? "", background: background)
         return tab.webView
+    }
+
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        guard let onMediaRequest else { return decisionHandler(.deny) }
+        onMediaRequest(origin, type, decisionHandler)
     }
 
     func webViewDidClose(_ webView: WKWebView) {

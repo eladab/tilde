@@ -120,6 +120,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         return dir
     }()
 
+    /// Which sites may use the camera and the microphone; kept beside the session.
+    private lazy var mediaPermissions: MediaPermissions = {
+        var dataDir = supportDir
+        if let session = ProcessInfo.processInfo.environment["TILDE_SESSION"], !session.isEmpty {
+            dataDir = URL(fileURLWithPath: session).deletingLastPathComponent()
+        }
+        return MediaPermissions(file: dataDir.appendingPathComponent("permissions.json"))
+    }()
+
     /// The list of downloads lives beside the session; the files go to ~/Downloads.
     private lazy var downloads: DownloadStore = {
         let env = ProcessInfo.processInfo.environment
@@ -144,6 +153,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         store.delegate = self
         store.onDownload = { [weak self] download in self?.downloads.adopt(download) }
         store.onSaveData = { [weak self] data, name, source in self?.downloads.save(data, suggestedFilename: name, from: source) }
+        store.onMediaRequest = { [weak self] origin, type, handler in
+            guard let self else { return handler(.deny) }
+            self.mediaPermissions.decide(origin: origin, type: type, window: self.window, handler: handler)
+        }
         store.onFind = { [weak self] tab, text, count, index in
             self?.emit("find.result", ["tab_id": tab, "text": text, "count": count, "index": index])
         }

@@ -36,6 +36,10 @@ pub struct TabEntry {
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub crashed: bool,
+    /// The page is using the camera.
+    pub camera: bool,
+    /// The page is using the microphone.
+    pub microphone: bool,
     /// Pinned tabs form the top section of the sidebar and survive being closed.
     pub pinned: bool,
     /// The address the tab had when it was pinned; "return to pinned page" goes here.
@@ -59,6 +63,8 @@ impl TabEntry {
         self.pending = false;
         self.loading = false;
         self.crashed = false;
+        self.camera = false;
+        self.microphone = false;
         self.can_go_back = false;
         self.can_go_forward = false;
         if let Some(url) = self.pin_url.clone().filter(|_| self.pinned) {
@@ -137,6 +143,12 @@ impl TabEntry {
         }
         if let Some(v) = state.can_go_forward {
             self.can_go_forward = v;
+        }
+        if let Some(v) = state.camera {
+            self.camera = v;
+        }
+        if let Some(v) = state.microphone {
+            self.microphone = v;
         }
         changed
     }

@@ -309,7 +309,19 @@ fn draw_sidebar(buf: &mut Buffer, app: &App) {
             (" ", p.dim)
         };
         put(buf, list.x + 1, y, 1, icon, Style::default().fg(icon_color).bg(bg));
-        put(buf, list.x + 3, y, list.width.saturating_sub(4), &tab.label(), style);
+        // A tab that has the camera or the microphone says so, in red, at
+        // the end of its row: it is on air.
+        let on_air = match (tab.camera, tab.microphone) {
+            (true, true) => "● cam mic",
+            (true, false) => "● cam",
+            (false, true) => "● mic",
+            (false, false) => "",
+        };
+        let mark_w = if on_air.is_empty() || list.width < 18 { 0 } else { on_air.width() as u16 + 1 };
+        put(buf, list.x + 3, y, list.width.saturating_sub(4 + mark_w), &tab.label(), style);
+        if mark_w > 0 {
+            put(buf, list.x + list.width - mark_w, y, mark_w - 1, on_air, Style::default().fg(p.red).bg(bg).add_modifier(Modifier::BOLD));
+        }
         if tab.loading {
             // The row fills with a trace of the space's colour as the page arrives.
             wash(buf, line, tab.progress, mix(bg, accent, 0.16));
