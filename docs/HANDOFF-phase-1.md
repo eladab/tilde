@@ -175,6 +175,17 @@ Requests (TUI → app):
 | `net.preserve` | `enabled: bool` | Whether requests are kept when a tab goes to another page (added) |
 | `storage.get` | `tab_id` | Answered once WebKit has been asked (added). Reply: `sites` (each `name` and `kinds`), `cookies` (every cookie of the tab's profile: `name`, `value`, `domain`, `path`, `expires?`, `secure`, `http_only`, `same_site`), and for the page the tab is on its `origin`, `site`, `local`, `session` (each `key`, `value`, `size`), `databases` and `caches` |
 | `storage.delete` | `tab_id`, `kind`, `name?`, `domain?`, `path?`, `site?`, `all?` | Deletes a `cookie`, a `local` or `session` key, an `indexeddb` database or a `cache` by `name`; with `all`, every one of that kind (cookies: of `site`); kind `site` deletes everything `site` stores (added) |
+| `tab.create` (more) | `state?` | The name of a kept state (added): the tab comes back with its pages back and forward and its scroll position; `url` is used when the state is gone |
+| `tab.discard` | `tab_id` | Lets the tab's page go, keeping its state under the name in the tab's `state` field (added). The TUI keeps its entry and wakes it with `tab.create` and that name. Closing a tab keeps its state the same way, which is what reopening a closed tab uses |
+| `state.keep` | `tokens` | The names of every state that still belongs to a tab; the app deletes the other state files (added). Sent once after the session is restored |
+| `tab.mute` | `tab_id`, `muted` | Switches the page's sound off or on (added). Fails with a sentence where WebKit cannot |
+| `page.scroll` | `tab_id`, `how` | Scrolls the page without focusing it (added): `line-down`, `line-up`, `half-down`, `half-up`, `page-down`, `page-up`, `top`, `bottom` |
+| `hints.start` | `tab_id` | Labels what can be followed on screen (added). Answered once the page has: `count` |
+| `hints.type` | `tab_id`, `typed`, `new_tab` | What has been typed of a label so far (added). Answered once the page has: `count` labels still match; `done` when one was followed; `url` when it is a link and `new_tab` was set (the TUI opens it); `focus` when it is a field that wants the keys |
+| `hints.stop` | `tab_id` | Takes the labels off the page (added) |
+| `overlay.set` / `overlay.clear` | `col`, `row`, `cols`, `rows` | The cells the TUI draws over the page (added, for the command palette). While set the app hides the page behind a dimmed still of it with those cells cut out |
+| `icons.set` | `icons`: each `col`, `row`, `url` | Where the app lays the icons of sites: two cells each, starting at `col` (added). Sent when the sidebar's rows change |
+| `blocking.toggle` | `tab_id` | Switches content blocking off for the site of the tab's page, or back on, and reloads it (added). Reply: `site`, `active` |
 | `shutdown` | | App quits cleanly |
 
 Events (app → TUI):
@@ -182,7 +193,7 @@ Events (app → TUI):
 | `event` | Fields |
 |---|---|
 | `tab.created` | `tab_id`, `opener_tab_id`, `url`, `background` (page-initiated tabs only). `background` (added) is true for Cmd-click, and the TUI then keeps its selection |
-| `tab.updated` | `tab_id`, any of `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward` |
+| `tab.updated` | `tab_id`, any of `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`; also (added) `audible`, `muted`, and `state`, the name the app keeps the tab's state under |
 | `tab.closed` | `tab_id` (`window.close()`) |
 | `tab.crashed` | `tab_id` (web content process terminated; TUI offers reload) |
 | `focus.changed` | `mode` |

@@ -307,11 +307,25 @@ impl History {
         }
     }
 
-    /// The lines of the history view: newest first, a heading before each group.
-    pub fn rows(&self, now: u64) -> Vec<Row> {
-        let mut rows = Vec::with_capacity(self.visits.len() + 8);
+    /// Every visit, newest first.
+    pub fn newest_first(&self) -> impl Iterator<Item = &Visit> {
+        self.visits.iter().rev()
+    }
+
+    /// The lines of the history view: newest first, a heading before each
+    /// group. With a `filter`, only the visits whose title or address holds
+    /// every word of it.
+    pub fn rows(&self, now: u64, filter: &str) -> Vec<Row> {
+        let words: Vec<String> = filter.split_whitespace().map(str::to_lowercase).collect();
+        let mut rows = Vec::with_capacity(if words.is_empty() { self.visits.len() + 8 } else { 64 });
         let mut last = None;
         for (index, visit) in self.visits.iter().rev().enumerate() {
+            if !words.is_empty() {
+                let text = format!("{} {}", visit.title, visit.url).to_lowercase();
+                if !words.iter().all(|word| text.contains(word.as_str())) {
+                    continue;
+                }
+            }
             let group = section(visit.time, now);
             if last != Some(group) {
                 rows.push(Row::Header(section_title(group, now)));
@@ -409,7 +423,7 @@ mod tests {
         history.visit("https://morning.example/", "M", "Work", NOW - 5 * 3600);
         history.visit("https://now.example/", "N", "Work", NOW - 60);
         assert_eq!(
-            history.rows(NOW),
+            history.rows(NOW, ""),
             vec![
                 Row::Header("Recent".into()),
                 Row::Item(0),

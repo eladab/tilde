@@ -51,8 +51,12 @@ enum MainMenu {
         let file = submenu("File")
         command(file, "New Tab", "new-tab", key: "t")
         command(file, "Open Location…", "edit-url", key: "l")
+        // Not Cmd+K: pages have palettes of their own on it.
+        command(file, "Command Palette…", "palette", key: "P")
         file.addItem(.separator())
         command(file, "Close Tab", "close-tab", key: "w")
+        // An uppercase key equivalent is how AppKit spells Shift for letters.
+        command(file, "Reopen Closed Tab", "reopen-tab", key: "T")
         file.addItem(.separator())
         let print = NSMenuItem(title: "Print…", action: #selector(AppController.printPage(_:)), keyEquivalent: "p")
         print.target = target
@@ -92,6 +96,10 @@ enum MainMenu {
         command(view, "Downloads", "downloads", key: "l", mods: [.command, .option])
         command(view, "Developer Tools", "devtools", key: "i", mods: [.command, .option])
         view.addItem(.separator())
+        command(view, "Follow a Link by Keyboard", "hints", key: "j")
+        command(view, "Follow a Link in a New Tab", "hints-new", key: "J")
+        command(view, "Content Blocking On or Off for This Site", "toggle-blocking", key: "")
+        view.addItem(.separator())
         func zoom(_ title: String, _ action: Selector, key: String, hidden: Bool = false) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
             item.target = target
@@ -119,6 +127,8 @@ enum MainMenu {
         // An uppercase key equivalent is how AppKit spells Shift for letters.
         command(tabs, "Return to Pinned Page", "pin-home", key: "H")
         command(tabs, "Rename Tab…", "rename-tab", key: "")
+        command(tabs, "Mute or Unmute Tab", "toggle-mute", key: "m", mods: [.command, .option])
+        command(tabs, "Put the Other Tabs to Sleep", "sleep-others", key: "")
         tabs.addItem(.separator())
         for n in 1...9 {
             command(tabs, n == 9 ? "Last Tab" : "Tab \(n)", "select-tab", key: "\(n)", arg: n)

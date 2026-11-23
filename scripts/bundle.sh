@@ -28,15 +28,25 @@ if [ -z "$IDENTITY" ]; then
 fi
 IDENTITY="${IDENTITY:--}"
 # Inside out: Sparkle's helpers, the framework, the TUI, then the app.
+# TILDE_HARDENED=1 signs with the hardened runtime, which notarization needs
+# (see scripts/notarize.sh); the app then says which devices it may use.
 sign() {
     local sparkle="$APP/Contents/Frameworks/Sparkle.framework/Versions/Current"
-    codesign --force --sign "$1" "$sparkle/XPCServices/Installer.xpc" &&
-    codesign --force --sign "$1" "$sparkle/XPCServices/Downloader.xpc" &&
-    codesign --force --sign "$1" "$sparkle/Autoupdate" &&
-    codesign --force --sign "$1" "$sparkle/Updater.app" &&
-    codesign --force --sign "$1" "$APP/Contents/Frameworks/Sparkle.framework" &&
-    codesign --force --sign "$1" "$APP/Contents/Helpers/tilde-tui" &&
-    codesign --force --sign "$1" "$APP"
+    local flags=(--force --sign "$1")
+    local app_flags=()
+    if [ "${TILDE_HARDENED:-}" = "1" ]; then
+        flags+=(--options runtime)
+        # A timestamp needs a real certificate.
+        [ "$1" = "-" ] || flags+=(--timestamp)
+        app_flags=(--entitlements app/Tilde.entitlements)
+    fi
+    codesign "${flags[@]}" "$sparkle/XPCServices/Installer.xpc" &&
+    codesign "${flags[@]}" "$sparkle/XPCServices/Downloader.xpc" &&
+    codesign "${flags[@]}" "$sparkle/Autoupdate" &&
+    codesign "${flags[@]}" "$sparkle/Updater.app" &&
+    codesign "${flags[@]}" "$APP/Contents/Frameworks/Sparkle.framework" &&
+    codesign "${flags[@]}" "$APP/Contents/Helpers/tilde-tui" &&
+    codesign "${flags[@]}" ${app_flags[@]+"${app_flags[@]}"} "$APP"
 }
 if ! sign "$IDENTITY"; then
     echo "signing with $IDENTITY failed; falling back to an ad-hoc signature" >&2

@@ -217,7 +217,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Option<Position> {
     let cursor = draw_toolbar(buf, app);
     draw_viewport(buf, app);
     let cursor = crate::devtools_ui::draw(buf, app, &p).or(cursor);
-    draw_status(buf, app).or(cursor)
+    let cursor = draw_status(buf, app).or(cursor);
+    // The palette is in front of everything, the page included.
+    crate::palette::draw(buf, app, &p).or(cursor)
 }
 
 fn draw_sidebar(buf: &mut Buffer, app: &App) {
@@ -317,10 +319,20 @@ fn draw_sidebar(buf: &mut Buffer, app: &App) {
             (false, true) => "● mic",
             (false, false) => "",
         };
-        let mark_w = if on_air.is_empty() || list.width < 18 { 0 } else { on_air.width() as u16 + 1 };
-        put(buf, list.x + 3, y, list.width.saturating_sub(4 + mark_w), &tab.label(), style);
-        if mark_w > 0 {
-            put(buf, list.x + list.width - mark_w, y, mark_w - 1, on_air, Style::default().fg(p.red).bg(bg).add_modifier(Modifier::BOLD));
+        // A tab that is heard says so too, and one that was silenced.
+        let sound = if tab.muted { "♪ off" } else if tab.audible { "♪" } else { "" };
+        let roomy = list.width >= 18;
+        let air_w = if on_air.is_empty() || !roomy { 0 } else { on_air.width() as u16 + 1 };
+        let sound_w = if sound.is_empty() || !roomy { 0 } else { sound.width() as u16 + 1 };
+        let mark_w = air_w + sound_w;
+        // The site's icon is laid over the two cells before the name.
+        put(buf, list.x + 4, y, list.width.saturating_sub(5 + mark_w), &tab.label(), style);
+        if sound_w > 0 {
+            let color = if tab.muted { p.faint } else { accent };
+            put(buf, list.x + list.width - mark_w, y, sound_w - 1, sound, Style::default().fg(color).bg(bg));
+        }
+        if air_w > 0 {
+            put(buf, list.x + list.width - air_w, y, air_w - 1, on_air, Style::default().fg(p.red).bg(bg).add_modifier(Modifier::BOLD));
         }
         if tab.loading {
             // The row fills with a trace of the space's colour as the page arrives.
@@ -813,6 +825,34 @@ fn draw_history(buf: &mut Buffer, app: &App, p: &Palette) {
         let x = list.x + "History".width() as u16 + 2;
         put(buf, x, app.layout.viewport.y + 1, (list.x + list.width).saturating_sub(x), "Clear all history?   y clears   any other key keeps it",
             Style::default().fg(p.yellow).bg(p.bg));
+    } else if app.history_typing || !app.history_filter.is_empty() {
+        // The filter takes the heading's line: what is typed, and how much it leaves.
+        draw_view_heading(buf, app, p, "History", "");
+        let list = app.view_list();
+        let y = app.layout.viewport.y + 1;
+        let x = list.x + "History".width() as u16 + 2;
+        let end = list.x + list.width;
+        let left = app.history_rows().iter().filter(|r| matches!(r, Row::Item(_))).count();
+        let note = format!("  {left} of {count}");
+        let room = end.saturating_sub(x);
+        let field_w = room.saturating_sub(note.width() as u16).min(40);
+        if field_w >= 6 {
+            let well = if app.history_typing { p.field } else { mix(p.bg, p.field, 0.55) };
+            fill(buf, Rect::new(x, y, field_w, 1), Style::default().bg(well).fg(p.text));
+            put(buf, x + 1, y, 1, "/", Style::default().fg(p.accent).bg(well).add_modifier(Modifier::BOLD));
+            let shown: String = {
+                // The end of a long filter is where the typing is.
+                let chars: Vec<char> = app.history_filter.chars().collect();
+                let keep = (field_w as usize).saturating_sub(5);
+                chars[chars.len().saturating_sub(keep)..].iter().collect()
+            };
+            put(buf, x + 3, y, field_w - 4, &shown, Style::default().fg(p.text).bg(well));
+            if app.history_typing {
+                let at = (x + 3 + shown.width() as u16).min(x + field_w - 1);
+                buf[(at, y)].set_symbol("▏").set_style(Style::default().fg(p.accent).bg(well));
+            }
+            put(buf, x + field_w, y, room - field_w, &note, Style::default().fg(p.dim).bg(p.bg));
+        }
     } else {
         draw_view_heading(buf, app, p, "History", &format!("{count} page{}, in every space", if count == 1 { "" } else { "s" }));
     }
@@ -827,6 +867,9 @@ fn draw_history(buf: &mut Buffer, app: &App, p: &Palette) {
     let host_w = if width >= 70 { 24 } else { 0 };
     let title_w = width.saturating_sub(7 + space_w + host_w + if host_w > 0 { 2 } else { 0 } + 2);
     let rows = app.history_rows();
+    if rows.is_empty() {
+        return draw_view_empty(buf, app, p, "No page in the history matches.");
+    }
     for (line, row) in rows.iter().skip(app.view_scroll).take(list.height as usize).enumerate() {
         let y = list.y + line as u16;
         match row {
@@ -1070,6 +1113,8 @@ fn draw_status(buf: &mut Buffer, app: &App) -> Option<Position> {
         return draw_find(buf, app, find, &p);
     }
     let (label, color) = match app.mode {
+        // The keys are letters of a label on the page.
+        Mode::Nav if app.hints_have_keys() => (" HINT ", YELLOW),
         // The keys are the dev tools pane's.
         Mode::Nav if app.dev_has_keys() && !app.overlay_open() && app.edit.is_none() => (" DEV ", YELLOW),
         Mode::Nav => (" NAV ", space_color(app.theme().0)),
@@ -1100,7 +1145,14 @@ fn draw_status(buf: &mut Buffer, app: &App) -> Option<Position> {
             segment(buf, &mut x, bar, &format!(" {} ", fit(&notice, 40)), Style::default().bg(p.field).fg(color).add_modifier(Modifier::BOLD));
         }
     }
-    if let Some(message) = &app.message {
+    if let Some(hints) = app.hints.as_ref().filter(|_| app.hints_have_keys()) {
+        let what = match hints.count {
+            None => "Labelling…".to_string(),
+            Some(count) if hints.typed.is_empty() => format!("{count} label{} · type one{}", if count == 1 { "" } else { "s" }, if hints.new_tab { " to open in a new tab" } else { "" }),
+            Some(count) => format!("{}  · {count} left", hints.typed.to_uppercase()),
+        };
+        segment(buf, &mut x, bar, &format!(" {what} "), plain.fg(p.text));
+    } else if let Some(message) = &app.message {
         segment(buf, &mut x, bar, &format!(" {message} "), plain.fg(p.yellow));
     } else if let Some(tab) = app.current().filter(|t| t.loading) {
         let percent = (tab.progress * 100.0).round().clamp(0.0, 100.0) as u32;
@@ -1108,9 +1160,11 @@ fn draw_status(buf: &mut Buffer, app: &App) -> Option<Position> {
         segment(buf, &mut x, bar, &format!("Loading… {percent}% "), plain.fg(p.text));
     }
 
-    let hint = if app.view.is_some() {
-        // The view lists its own keys along its bottom edge.
+    let hint = if app.view.is_some() || app.palette.is_some() {
+        // The view lists its own keys along its bottom edge, and so does the palette.
         ""
+    } else if app.hints_have_keys() {
+        "⌫ undo   esc cancel"
     } else if app.help {
         "any key closes"
     } else if app.form.is_some() || app.confirm_delete {
@@ -1130,8 +1184,8 @@ fn draw_status(buf: &mut Buffer, app: &App) -> Option<Position> {
         }
     } else {
         match app.mode {
-            Mode::Nav => "j/k tabs   o url   t new   x close   y history   d downloads   ? keys",
-            Mode::Page => "⌘. tabs   ⌘L url   ⌘T new   ⌘/ keys",
+            Mode::Nav => "j/k tabs   f follow   : palette   o url   t new   x close   ? keys",
+            Mode::Page => "⌘. tabs   ⌘J follow   ⇧⌘P palette   ⌘L url   ⌘/ keys",
         }
     };
     let hint_w = hint.width() as u16 + 1;

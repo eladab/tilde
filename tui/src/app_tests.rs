@@ -1922,3 +1922,280 @@ fn a_tab_using_the_camera_or_microphone_is_marked() {
     app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{tab_id},"camera":false,"microphone":false}}"#));
     assert!(!render(&mut app, 100, 12).contains("● cam") && !render(&mut app, 100, 12).contains("● mic"));
 }
+
+// ----- reaching into the page, the palette, and tabs that rest -----
+
+fn sent_methods(engine: &Engine, method: &str) -> Vec<serde_json::Value> {
+    engine.borrow().log.iter().filter(|r| r["method"] == method).cloned().collect()
+}
+
+#[test]
+fn the_page_is_scrolled_from_nav_mode() {
+    let (mut app, engine) = start();
+    key(&mut app, ' ');
+    key(&mut app, 'G');
+    key(&mut app, 'g');
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert_eq!(engine.borrow().scrolled, vec!["page-down", "bottom", "top", "half-down", "half-up"]);
+    assert_eq!(app.mode, Mode::Nav, "the page never had the keys");
+    assert!(app.view.is_none(), "Ctrl+D scrolls; it is d alone that opens the downloads");
+}
+
+#[test]
+fn links_are_followed_by_typing_their_labels() {
+    let (mut app, engine) = start();
+    key(&mut app, 'f');
+    assert_eq!(app.hints.as_ref().unwrap().count, Some(3));
+    assert!(render(&mut app, 100, 12).lines().last().unwrap().contains("HINT"));
+    // A letter that is no label takes the labels down and says so.
+    key(&mut app, 'q');
+    assert!(app.hints.is_none() && !app.should_quit, "q was a label's letter, not quit");
+    assert_eq!(app.message.as_deref(), Some("No such label."));
+
+    // A button is pressed where it is; the keys stay with the tabs.
+    key(&mut app, 'f');
+    key(&mut app, 'd');
+    assert!(app.hints.is_none() && engine.borrow().hints.is_none());
+    assert_eq!(app.mode, Mode::Nav);
+    // A field takes the keys.
+    key(&mut app, 'f');
+    key(&mut app, 'a');
+    assert_eq!(app.mode, Mode::Page);
+
+    // F opens a link in a tab behind this one, which loads at once.
+    command(&mut app, "toggle-mode");
+    let before = app.selected;
+    key(&mut app, 'F');
+    key(&mut app, 's');
+    assert_eq!(app.selected, before, "the selection stays");
+    let behind = &app.tabs[before + 1];
+    assert_eq!(behind.url, "https://linked.example/");
+    assert!(behind.tab_id.is_some(), "and the new tab has its page");
+    assert_ne!(engine.borrow().active, behind.tab_id, "but is not the one showing");
+
+    // Escape takes the labels down; from the page, the page gets the keys back.
+    command(&mut app, "toggle-mode");
+    assert_eq!(app.mode, Mode::Page);
+    command(&mut app, "hints");
+    assert_eq!(app.mode, Mode::Nav);
+    press(&mut app, KeyCode::Esc);
+    assert!(app.hints.is_none() && engine.borrow().hints.is_none());
+    assert_eq!(app.mode, Mode::Page);
+}
+
+#[test]
+fn labels_go_when_their_tab_is_left() {
+    let (mut app, engine) = three_tabs();
+    key(&mut app, 'f');
+    assert!(engine.borrow().hints.is_some());
+    command(&mut app, "next-tab");
+    assert!(app.hints.is_none() && engine.borrow().hints.is_none());
+}
+
+#[test]
+fn the_palette_finds_tabs_history_and_commands() {
+    let (mut app, engine) = three_tabs();
+    app.history.visit("https://docs.example/guide", "The Guide to Everything", "Home", 1_000);
+    let first = app.tabs[0].key;
+    key(&mut app, ':');
+    let palette = app.palette.as_ref().unwrap();
+    assert!(palette.items.iter().any(|i| i.kind == "tab") && palette.items.iter().any(|i| i.kind == "command"));
+    assert!(palette.items.iter().all(|i| i.kind != "history"), "the history waits for something to be typed");
+    assert!(engine.borrow().overlay.is_some(), "the app is told which cells are drawn over the page");
+    assert!(engine.borrow().visible, "and the page is not hidden for it");
+    let screen = render(&mut app, 120, 30);
+    println!("{screen}");
+    assert!(screen.contains("Find a tab, a page or a command"), "{screen}");
+
+    // Typing narrows it; a tab comes before the history.
+    type_text(&mut app, "webkit");
+    let palette = app.palette.as_ref().unwrap();
+    assert_eq!((palette.items[0].kind, palette.items.last().unwrap().kind), ("tab", "search"));
+    press(&mut app, KeyCode::Enter);
+    assert!(app.palette.is_none() && engine.borrow().overlay.is_none());
+    assert_eq!(app.current().unwrap().key, first, "Enter went to the tab");
+
+    // A page from the history opens in a new tab.
+    key(&mut app, ':');
+    type_text(&mut app, "guide every");
+    assert_eq!(app.palette.as_ref().unwrap().items[0].kind, "history");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.current().unwrap().url, "https://docs.example/guide");
+
+    // An address is opened as one; ">" lists commands only.
+    command(&mut app, "toggle-mode");
+    key(&mut app, ':');
+    type_text(&mut app, "new.example/x");
+    assert_eq!(app.palette.as_ref().unwrap().items[0].kind, "open");
+    press(&mut app, KeyCode::Esc);
+    key(&mut app, '>');
+    type_text(&mut app, "sidebar");
+    let palette = app.palette.as_ref().unwrap();
+    assert!(palette.items.iter().all(|i| i.kind == "command") && palette.items[0].title.contains("sidebar"));
+    press(&mut app, KeyCode::Enter);
+    assert!(!app.sidebar_visible && app.palette.is_none());
+}
+
+#[test]
+fn the_palette_opens_from_the_page_and_gives_the_keys_back() {
+    let (mut app, engine) = start();
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.mode, Mode::Page);
+    command(&mut app, "palette");
+    assert_eq!(app.mode, Mode::Nav);
+    assert!(app.palette.is_some());
+    command(&mut app, "palette");
+    assert!(app.palette.is_none() && engine.borrow().overlay.is_none());
+    assert_eq!(app.mode, Mode::Page);
+    // Another shortcut closes it and is then carried out.
+    command(&mut app, "palette");
+    command(&mut app, "new-tab");
+    assert!(app.palette.is_none() && app.edit.is_some());
+}
+
+#[test]
+fn a_closed_tab_is_reopened_as_it_was() {
+    let (mut app, engine) = three_tabs();
+    let closed_url = app.current().unwrap().url.clone();
+    let state = app.current().unwrap().state.clone().expect("the app names the tab's state");
+    key(&mut app, 'x');
+    assert!(!urls(&app).contains(&closed_url.as_str()));
+    key(&mut app, 'u');
+    assert_eq!(app.current().unwrap().url, closed_url);
+    assert!(engine.borrow().restored_from.contains(&state), "the tab is made from the state that was kept");
+    key(&mut app, 'u');
+    assert_eq!(app.message.as_deref(), Some("No closed tab to reopen."));
+}
+
+#[test]
+fn tabs_out_of_sight_are_put_to_sleep_and_woken_as_they_were() {
+    use std::time::{Duration, Instant};
+    let (mut app, engine) = three_tabs();
+    app.discard_after = Some(Duration::from_secs(60));
+    key(&mut app, 'k');
+    key(&mut app, 'p'); // the middle tab is pinned: it is kept
+    let pinned = app.tabs[0].tab_id.unwrap();
+    let now = Instant::now();
+    app.tick(now);
+    assert!(engine.borrow().discarded.is_empty(), "nothing has been out of sight for long yet");
+    // A tab that is heard is in use.
+    let heard = app.tabs[1].tab_id.unwrap();
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{heard},"audible":true}}"#));
+    app.tick(now + Duration::from_secs(120));
+    let asleep: Vec<u64> = engine.borrow().discarded.iter().map(|(id, _)| *id).collect();
+    assert_eq!(asleep.len(), 1, "one tab was idle, unpinned and silent");
+    assert!(!asleep.contains(&pinned) && !asleep.contains(&heard));
+    let index = app.tabs.iter().position(|t| t.tab_id.is_none()).unwrap();
+    let (url, state) = (app.tabs[index].url.clone(), app.tabs[index].state.clone().unwrap());
+    assert!(!url.is_empty(), "the tab keeps its place and its address");
+
+    // Showing it again brings it back from its state.
+    app.select(index);
+    rest(&mut app);
+    assert!(app.tabs[index].tab_id.is_some());
+    assert_eq!(engine.borrow().restored_from.last(), Some(&state));
+
+    // All the others at once, by command: the pinned and the heard stay.
+    command(&mut app, "sleep-others");
+    assert_eq!(app.message.as_deref(), Some("No other tab to put to sleep."));
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{heard},"audible":false}}"#));
+    app.select(index);
+    rest(&mut app);
+    command(&mut app, "sleep-others");
+    assert_eq!(app.message.as_deref(), Some("1 tab put to sleep."));
+    assert!(app.tabs.iter().any(|t| t.tab_id == Some(pinned)));
+
+    // With sleep switched off nothing is let go.
+    app.discard_after = None;
+    let count = engine.borrow().discarded.len();
+    app.tick(now + Duration::from_secs(100_000));
+    assert_eq!(engine.borrow().discarded.len(), count);
+}
+
+#[test]
+fn the_session_remembers_each_tab_state() {
+    let path = temp_session("states");
+    let _ = std::fs::remove_file(&path);
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let mut app = start_with(engine.clone(), Some(path.clone()));
+    let state = app.tabs[0].state.clone().unwrap();
+    app.save_session();
+    drop(app);
+
+    // A new run of the app: the tab is made again from the state it had.
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let app = start_with(engine.clone(), Some(path.clone()));
+    assert_eq!(engine.borrow().restored_from, vec![state.clone()]);
+    let kept = sent_methods(&engine, "state.keep");
+    assert_eq!(kept[0]["tokens"], serde_json::json!([state]), "the app is told which states are still wanted");
+    drop(app);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(crate::history::path_beside(&path));
+}
+
+#[test]
+fn a_tab_is_muted_and_says_so() {
+    let (mut app, engine) = start();
+    let tab_id = app.current().unwrap().tab_id.unwrap();
+    app.handle_line(&format!(r#"{{"event":"tab.updated","tab_id":{tab_id},"audible":true}}"#));
+    assert!(render(&mut app, 100, 12).contains('♪'));
+    key(&mut app, 'm');
+    assert_eq!(sent_methods(&engine, "tab.mute")[0]["muted"], true);
+    assert!(app.current().unwrap().muted);
+    assert!(render(&mut app, 100, 12).contains("♪ off"));
+    key(&mut app, 'm');
+    assert!(!app.current().unwrap().muted);
+}
+
+#[test]
+fn the_app_is_told_where_the_icons_go() {
+    let (mut app, engine) = three_tabs();
+    app.set_area(Rect::new(0, 0, 120, 40));
+    let icons = engine.borrow().icons.clone();
+    assert_eq!(icons.len(), 3, "one for each tab on screen");
+    // Row 3 is the pin placeholder, row 4 the rule; the tabs follow.
+    assert_eq!(icons[0], serde_json::json!({"col": 1, "row": 5, "url": "https://webkit.org"}));
+    // With the sidebar hidden there is nowhere to put them.
+    key(&mut app, 'b');
+    app.set_area(Rect::new(0, 0, 120, 40));
+    assert!(engine.borrow().icons.is_empty());
+}
+
+#[test]
+fn content_blocking_is_switched_per_site() {
+    let (mut app, _engine) = start();
+    command(&mut app, "toggle-blocking");
+    assert_eq!(app.message.as_deref(), Some("Content blocking is off for webkit.org."));
+    command(&mut app, "toggle-blocking");
+    assert_eq!(app.message.as_deref(), Some("Content blocking is on again for webkit.org."));
+}
+
+#[test]
+fn the_history_view_is_filtered_by_typing() {
+    let (mut app, _engine) = start();
+    app.now_override = Some(10_000);
+    app.history.clear();
+    app.history.visit("https://a.example/", "Alpha news", "Home", 9_000);
+    app.history.visit("https://b.example/", "Beta notes", "Home", 9_100);
+    app.history.visit("https://c.example/", "Gamma news", "Home", 9_200);
+    key(&mut app, 'y');
+    key(&mut app, '/');
+    type_text(&mut app, "news");
+    assert!(app.history_typing);
+    let screen = render(&mut app, 120, 20);
+    assert!(screen.contains("Alpha news") && screen.contains("Gamma news") && !screen.contains("Beta notes"), "{screen}");
+    assert!(screen.contains("2 of 3"));
+    // Enter hands the keys to the list, which moves among what is left.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.history.get(app.view_selected).unwrap().title, "Gamma news");
+    key(&mut app, 'j');
+    assert_eq!(app.history.get(app.view_selected).unwrap().title, "Alpha news");
+    key(&mut app, 'j');
+    assert_eq!(app.history.get(app.view_selected).unwrap().title, "Alpha news", "the list ends there");
+    // Escape lets go of the filter first, then of the view.
+    press(&mut app, KeyCode::Esc);
+    assert!(app.history_filter.is_empty() && app.view.is_some());
+    press(&mut app, KeyCode::Esc);
+    assert!(app.view.is_none());
+}

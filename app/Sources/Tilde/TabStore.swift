@@ -20,9 +20,21 @@ final class Tab {
     /// Advances with each new text searched for in the page.
     var findGeneration = 0
 
-    init(id: TabID, webView: WKWebView) {
+    /// Names the file the tab's state is kept in (see `TabStateStore`). It
+    /// outlives the web view: a tab made again from its state keeps the name.
+    let token: String
+    /// The page's sound is switched off.
+    var muted = false
+    var audioObservation: NamedObserver?
+    /// Dialogs the page's script has put up since the tab arrived at it.
+    var dialogCount = 0
+    /// The user asked to see no more of them from this page.
+    var dialogsBlocked = false
+
+    init(id: TabID, webView: WKWebView, token: String) {
         self.id = id
         self.webView = webView
+        self.token = token
     }
 
     /// Counts the pages this tab has arrived at, for the history. A page that
@@ -59,6 +71,9 @@ final class Tab {
             // Muted devices count: the page still holds them.
             "camera": webView.cameraCaptureState != .none,
             "microphone": webView.microphoneCaptureState != .none,
+            "audible": PageAudio.isPlaying(webView),
+            "muted": muted,
+            "state": token,
         ]
     }
 }
@@ -84,6 +99,14 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
     var onFind: ((TabID, String, Int, Int) -> Void)?
     /// Told of every navigation while the dev tools are recording requests.
     var monitor: NetworkMonitor?
+    var blocker: ContentBlocker?
+    var states: TabStateStore?
+    var zoom: ZoomStore?
+    var favicons: Favicons?
+    /// The window that sheets are shown on.
+    var presenter: (() -> NSWindow?)?
+    /// The answer awaited from the certificate chooser, which reports back through a selector.
+    var certificateAnswer: ((Bool) -> Void)?
     private(set) var tabs: [TabID: Tab] = [:]
     private var order: [TabID] = []
     private var nextID: TabID = 1
@@ -103,10 +126,11 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         // Without this WebKit sends a user agent with no browser token and
         // many sites serve a degraded page.
-        configuration.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15"
+        configuration.applicationNameForUserAgent = UserAgent.application
         configuration.preferences.isElementFullscreenEnabled = true
         configurations[name] = configuration
         monitor?.install(on: configuration.userContentController)
+        blocker?.install(on: configuration.userContentController)
         return configuration
     }
 
@@ -126,15 +150,24 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         tabs.values.first { $0.webView === webView }
     }
 
+    /// Makes a tab. With `state`, the name of a state kept earlier, the tab
+    /// comes back as it was: its pages back and forward, and where it was
+    /// scrolled to. `url` is where it goes when there is no such state.
     @discardableResult
-    func create(url: URL?, profile: String? = nil) -> Tab {
-        let tab = adopt(WKWebView(frame: .zero, configuration: configuration(for: profile)))
+    func create(url: URL?, profile: String? = nil, state: String? = nil) -> Tab {
+        let token = state.flatMap { TabStateStore.isToken($0) ? $0 : nil }
+        let tab = adopt(WKWebView(frame: .zero, configuration: configuration(for: profile)), token: token)
+        if let token, let saved = states?.load(token) {
+            tab.webView.interactionState = saved
+            if tab.webView.backForwardList.currentItem != nil { return tab }
+            Log.write("tab \(tab.id): its kept state could not be used")
+        }
         if let url { tab.webView.load(URLRequest(url: url)) }
         return tab
     }
 
-    private func adopt(_ webView: WKWebView) -> Tab {
-        let tab = Tab(id: nextID, webView: webView)
+    private func adopt(_ webView: WKWebView, token: String? = nil) -> Tab {
+        let tab = Tab(id: nextID, webView: webView, token: token ?? UUID().uuidString.lowercased())
         nextID += 1
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -155,6 +188,7 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
             webView.observe(\.cameraCaptureState) { _, _ in mark() },
             webView.observe(\.microphoneCaptureState) { _, _ in mark() },
         ]
+        tab.audioObservation = PageAudio.observe(webView, onChange: mark)
         tabs[id] = tab
         order.append(id)
         return tab
@@ -162,6 +196,10 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func close(_ id: TabID) {
         guard let tab = tabs.removeValue(forKey: id) else { return }
+        // Kept so that the tab can be reopened, or woken, as it was.
+        states?.save(tab)
+        tab.audioObservation?.invalidate()
+        tab.audioObservation = nil
         monitor?.tabClosed(id)
         order.removeAll { $0 == id }
         dirty.remove(id)
@@ -248,11 +286,19 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let tab = tab(for: webView) else { return }
+        tab.dialogCount = 0
+        tab.dialogsBlocked = false
+        // Each site is shown at the size it was last given.
+        if let zoom {
+            let level = zoom.level(for: webView.url)
+            if abs(webView.pageZoom - level) > 0.001 { webView.pageZoom = level }
+        }
         markDirty(tab.id)
         monitor?.didCommit(tab)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        favicons?.learn(from: webView)
         if let monitor, let tab = tab(for: webView) { monitor.didFinish(tab) }
     }
 
@@ -331,24 +377,5 @@ final class TabStore: NSObject, WKNavigationDelegate, WKUIDelegate {
         let id = tab.id
         close(id)
         delegate?.tabStore(self, didClose: id)
-    }
-
-    // JS dialogs get a real UI in phase 2; until then they are dismissed and logged.
-    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-        Log.write("js alert dismissed: \(message.prefix(200))")
-        completionHandler()
-    }
-
-    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        Log.write("js confirm dismissed: \(message.prefix(200))")
-        completionHandler(false)
-    }
-
-    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
-                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
-        Log.write("js prompt dismissed: \(prompt.prefix(200))")
-        completionHandler(nil)
     }
 }

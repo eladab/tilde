@@ -26,6 +26,7 @@ impl MockTab {
             "progress": 1.0,
             "can_go_back": self.index > 0,
             "can_go_forward": self.index + 1 < self.history.len(),
+            "state": format!("state-{}", self.id),
         })
     }
 
@@ -58,6 +59,19 @@ pub struct MockEngine {
     cookies: Vec<Value>,
     local: Vec<Value>,
     session: Vec<Value>,
+    /// Tabs whose pages were let go, and the state names they were kept under.
+    pub discarded: Vec<(u64, String)>,
+    /// The cells drawn over the page, while there are any.
+    pub overlay: Option<(u64, u64, u64, u64)>,
+    pub icons: Vec<Value>,
+    /// What has been typed of a label, while labels are up.
+    pub hints: Option<String>,
+    pub scrolled: Vec<String>,
+    muted: Vec<u64>,
+    /// Sites content blocking is switched off for.
+    unblocked: Vec<String>,
+    /// The state names every tab was made with.
+    pub restored_from: Vec<String>,
 }
 
 /// The requests a page at `url` is pretended to have made, in full.
@@ -237,6 +251,9 @@ impl MockEngine {
                 if req["activate"].as_bool() == Some(true) {
                     self.active = Some(tab_id);
                 }
+                if let Some(state) = req["state"].as_str() {
+                    self.restored_from.push(state.to_string());
+                }
                 out.push(ok(json!({"tab_id": tab_id})));
                 out.push(Self::updated(&tab));
                 self.tabs.push(tab);
@@ -310,7 +327,87 @@ impl MockEngine {
                     out.push(json!({"event": "focus.changed", "mode": granted}).to_string());
                 }
             }
-            "clipboard.set" => out.push(ok(json!({}))),
+            "clipboard.set" | "state.keep" => out.push(ok(json!({}))),
+            "tab.discard" => match tab_index {
+                Some(i) => {
+                    let gone = self.tabs.remove(i);
+                    if self.active == Some(gone.id) {
+                        self.active = None;
+                    }
+                    self.discarded.push((gone.id, format!("state-{}", gone.id)));
+                    out.push(ok(json!({})));
+                }
+                None => out.push(fail("no such tab")),
+            },
+            "tab.mute" => match tab_index {
+                Some(i) => {
+                    let id = self.tabs[i].id;
+                    let muted = req["muted"].as_bool() == Some(true);
+                    self.muted.retain(|t| *t != id);
+                    if muted {
+                        self.muted.push(id);
+                    }
+                    out.push(ok(json!({"muted": muted})));
+                    out.push(json!({"event": "tab.updated", "tab_id": id, "muted": muted}).to_string());
+                }
+                None => out.push(fail("no such tab")),
+            },
+            "page.scroll" => {
+                self.scrolled.push(req["how"].as_str().unwrap_or("").to_string());
+                out.push(ok(json!({})));
+            }
+            // Every page has three things to follow, labelled s, a and d:
+            // a link, a field and a button.
+            "hints.start" => {
+                self.hints = Some(String::new());
+                out.push(ok(json!({"count": 3})));
+            }
+            "hints.type" => {
+                let typed = req["typed"].as_str().unwrap_or("").to_string();
+                let new_tab = req["new_tab"].as_bool() == Some(true);
+                let answer = match typed.as_str() {
+                    "" => json!({"done": false, "count": 3}),
+                    "s" if new_tab => json!({"done": true, "count": 1, "url": "https://linked.example/"}),
+                    "s" | "d" => json!({"done": true, "count": 1}),
+                    "a" => json!({"done": true, "count": 1, "focus": true}),
+                    _ => json!({"done": false, "count": 0}),
+                };
+                self.hints = if answer["done"] == true || answer["count"] == 0 { None } else { Some(typed) };
+                out.push(ok(answer));
+            }
+            "hints.stop" => {
+                self.hints = None;
+                out.push(ok(json!({})));
+            }
+            "overlay.set" => {
+                self.overlay = Some((
+                    req["col"].as_u64().unwrap_or(0),
+                    req["row"].as_u64().unwrap_or(0),
+                    req["cols"].as_u64().unwrap_or(0),
+                    req["rows"].as_u64().unwrap_or(0),
+                ));
+                out.push(ok(json!({})));
+            }
+            "overlay.clear" => {
+                self.overlay = None;
+                out.push(ok(json!({})));
+            }
+            "icons.set" => {
+                self.icons = req["icons"].as_array().cloned().unwrap_or_default();
+                out.push(ok(json!({})));
+            }
+            "blocking.toggle" => match tab_index {
+                Some(i) => {
+                    let site = host_of(self.tabs[i].url());
+                    let was_off = self.unblocked.contains(&site);
+                    self.unblocked.retain(|s| *s != site);
+                    if !was_off {
+                        self.unblocked.push(site.clone());
+                    }
+                    out.push(ok(json!({"site": site, "active": was_off})));
+                }
+                None => out.push(fail("no such tab")),
+            },
             "net.watch" => {
                 let tab = req["tab_id"].as_u64();
                 if self.net_watch.is_none() {

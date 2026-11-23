@@ -123,6 +123,7 @@ fn session_tabs(tabs: &[TabEntry], selected: usize) -> (Vec<SessionTab>, usize) 
             pin_url: entry.pin_url.clone(),
             pin_title: entry.pin_title.clone(),
             name: entry.name.clone(),
+            state: entry.state.clone(),
         });
     }
     (out, active)
@@ -164,6 +165,7 @@ impl App {
     }
 
     pub(crate) fn close_overlays(&mut self) {
+        self.close_palette();
         if !self.overlay_open() {
             return;
         }
@@ -483,6 +485,7 @@ impl App {
                     pin_url: if tab.pinned { tab.pin_url.clone().or_else(|| Some(tab.url.clone())) } else { None },
                     pin_title: tab.pin_title.clone().filter(|t| tab.pinned && !t.is_empty()),
                     name: tab.name.clone().filter(|n| !n.is_empty()),
+                    state: tab.state.clone().filter(|s| !s.is_empty()),
                     ..Default::default()
                 };
                 // Tabs the app still has loaded are adopted, not opened again.
@@ -540,6 +543,7 @@ impl App {
         self.active_sent = live_active;
         self.ready = true;
         self.session_dirty = true;
+        self.keep_states();
         self.ensure_active();
     }
 }

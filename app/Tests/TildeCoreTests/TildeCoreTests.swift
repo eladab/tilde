@@ -291,3 +291,54 @@ final class SiteMatchTests: XCTestCase {
         XCTAssertFalse(SiteMatch.belongs("example.com", to: ""))
     }
 }
+
+final class BlockRulesTests: XCTestCase {
+    func testDomainsAreReadFromListsOfEitherShape() {
+        let text = """
+        # a comment
+        ads.example.com
+        0.0.0.0 tracker.example.net   # trailing comment
+        127.0.0.1 localhost
+        ||pixel.example.org^
+        not a domain at all
+        nodot
+
+        """
+        XCTAssertEqual(BlockRules.domains(in: text), ["ads.example.com", "tracker.example.net", "pixel.example.org"])
+    }
+
+    func testRulesBlockThirdPartyRequestsAndExemptSites() throws {
+        let json = BlockRules.json(domains: ["ads.example.com", "ads.example.com", "t.example/pixel"], exempt: ["shop.example", "bad host"])
+        let rules = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+        XCTAssertEqual(rules.count, 3, "two domains, said once each, and the exemption")
+        let first = try XCTUnwrap(rules[0]["trigger"] as? [String: Any])
+        XCTAssertEqual(first["url-filter"] as? String, "^[^:]+://+([^:/]+\\.)?ads\\.example\\.com[:/]")
+        XCTAssertEqual(first["load-type"] as? [String], ["third-party"])
+        let path = try XCTUnwrap(rules[1]["trigger"] as? [String: Any])
+        XCTAssertEqual(path["url-filter"] as? String, "^[^:]+://+([^:/]+\\.)?t\\.example(:[0-9]+)?/pixel")
+        let last = rules[2]
+        XCTAssertEqual((last["action"] as? [String: Any])?["type"] as? String, "ignore-previous-rules")
+        XCTAssertEqual((last["trigger"] as? [String: Any])?["if-top-url"] as? [String], ["^[^:]+://+([^:/]+\\.)?shop\\.example[:/]"])
+    }
+
+    func testTheBuiltInListCompilesToRulesOfItsOwn() throws {
+        let json = BlockRules.json(domains: BlockRules.builtIn, exempt: [])
+        let rules = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+        XCTAssertEqual(rules.count, Set(BlockRules.builtIn).count)
+        XCTAssertGreaterThan(rules.count, 100)
+    }
+
+    func testAListIsNamedAfterItsContent() {
+        let a = BlockRules.identifier(for: BlockRules.json(domains: ["a.example"], exempt: []))
+        let b = BlockRules.identifier(for: BlockRules.json(domains: ["a.example"], exempt: ["b.example"]))
+        XCTAssertNotEqual(a, b)
+        XCTAssertEqual(a, BlockRules.identifier(for: BlockRules.json(domains: ["a.example"], exempt: [])))
+        XCTAssertTrue(a.hasPrefix("tilde-block-"))
+    }
+
+    func testSitesIgnoreALeadingWww() {
+        XCTAssertEqual(BlockRules.site(of: URL(string: "https://www.Example.com/a")), "example.com")
+        XCTAssertEqual(BlockRules.site(of: URL(string: "https://news.example.com")), "news.example.com")
+        XCTAssertNil(BlockRules.site(of: URL(string: "about:blank")))
+    }
+}

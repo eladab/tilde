@@ -39,6 +39,8 @@ impl App {
         let came_from = self.view_return.take().or(self.help_return.take());
         self.view_return = came_from.or(Some(self.mode).filter(|m| *m == Mode::Page));
         self.view = Some(view);
+        self.history_filter.clear();
+        self.history_typing = false;
         self.view_selected = 0;
         self.view_scroll = 0;
         self.confirm_clear = false;
@@ -54,6 +56,8 @@ impl App {
         if self.view.take().is_none() {
             return;
         }
+        self.history_filter.clear();
+        self.history_typing = false;
         self.confirm_clear = false;
         self.ensure_active();
         if self.view_return.take() == Some(Mode::Page) {
@@ -72,7 +76,53 @@ impl App {
     }
 
     pub fn history_rows(&self) -> Vec<Row> {
-        self.history.rows(self.now())
+        self.history.rows(self.now(), &self.history_filter)
+    }
+
+    /// The visits the History view lists, as indices from the newest: all
+    /// of them, or those the filter leaves.
+    fn history_items(&self) -> Vec<usize> {
+        self.history_rows().into_iter().filter_map(|row| if let Row::Item(index) = row { Some(index) } else { None }).collect()
+    }
+
+    /// The filter changed: the selection goes to the first visit it leaves.
+    fn history_filter_changed(&mut self) {
+        self.view_selected = self.history_items().first().copied().unwrap_or(0);
+        self.view_scroll = 0;
+        self.clamp_view();
+    }
+
+    pub(crate) fn history_filter_paste(&mut self, text: &str) {
+        self.history_filter.extend(text.chars().filter(|c| !c.is_control()));
+        self.history_filter_changed();
+    }
+
+    /// Keys while the filter is being typed.
+    fn handle_filter_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.history_typing = false;
+                self.history_filter.clear();
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.history_typing = false;
+                self.history_filter.clear();
+            }
+            // The filter stays; the keys go back to the list.
+            KeyCode::Enter | KeyCode::Down | KeyCode::Tab => {
+                self.history_typing = false;
+                return;
+            }
+            KeyCode::Backspace if self.history_filter.is_empty() => self.history_typing = false,
+            KeyCode::Backspace => {
+                self.history_filter.pop();
+            }
+            KeyCode::Char('u') if ctrl => self.history_filter.clear(),
+            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => self.history_filter.push(c),
+            _ => return,
+        }
+        self.history_filter_changed();
     }
 
     /// The download on line `index` of the view; the newest is first.
@@ -92,6 +142,13 @@ impl App {
     pub(crate) fn clamp_view(&mut self) {
         let len = self.view_len();
         self.view_selected = self.view_selected.min(len.saturating_sub(1));
+        if self.view == Some(View::History) && !self.history_filter.is_empty() {
+            // The selection stays on a visit the filter leaves.
+            let items = self.history_items();
+            if !items.contains(&self.view_selected) {
+                self.view_selected = items.first().copied().unwrap_or(0);
+            }
+        }
         let height = self.view_list().height as usize;
         if height == 0 || len == 0 {
             self.view_scroll = 0;
@@ -115,6 +172,14 @@ impl App {
     }
 
     fn move_in_view(&mut self, delta: i64) {
+        if self.view == Some(View::History) && !self.history_filter.is_empty() {
+            let items = self.history_items();
+            let at = items.iter().position(|i| *i == self.view_selected).unwrap_or(0) as i64;
+            let to = (at + delta).clamp(0, (items.len() as i64 - 1).max(0)) as usize;
+            self.view_selected = items.get(to).copied().unwrap_or(0);
+            self.confirm_clear = false;
+            return self.clamp_view();
+        }
         let last = self.view_len().saturating_sub(1) as i64;
         self.view_selected = (self.view_selected as i64 + delta).clamp(0, last.max(0)) as usize;
         self.confirm_clear = false;
@@ -135,9 +200,21 @@ impl App {
             return;
         }
         self.message = None;
+        if self.history_typing && view == View::History {
+            return self.handle_filter_key(key);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = self.view_list().height.max(1) as i64;
         match key.code {
+            KeyCode::Char('/') if view == View::History => {
+                self.history_typing = true;
+                return;
+            }
+            // Escape first lets go of a filter, then of the view.
+            KeyCode::Esc if view == View::History && !self.history_filter.is_empty() => {
+                self.history_filter.clear();
+                return self.history_filter_changed();
+            }
             KeyCode::Esc | KeyCode::Char('q') => return self.close_view(),
             KeyCode::Char('c') if ctrl => return self.close_view(),
             KeyCode::Char('?') => return self.open_help(),
@@ -157,7 +234,13 @@ impl App {
                 KeyCode::Enter => self.open_visit(false),
                 KeyCode::Char('s') => self.open_visit(true),
                 KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => {
+                    // With a filter, the selection moves to the visit that
+                    // takes this one's line.
+                    let items = self.history_items();
+                    let Some(at) = items.iter().position(|i| *i == self.view_selected) else { return };
                     self.history.remove(self.view_selected);
+                    let left = self.history_items();
+                    self.view_selected = left.get(at).or(left.last()).copied().unwrap_or(0);
                     self.clamp_view();
                 }
                 KeyCode::Char('C') if !self.history.is_empty() => self.confirm_clear = true,

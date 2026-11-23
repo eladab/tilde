@@ -33,7 +33,50 @@ pub enum Request {
         /// Which cookie jar the tab uses; absent means the default one.
         #[serde(skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
+        /// The name of a state the app kept for this tab: its pages back
+        /// and forward, and where it was scrolled to. The tab comes back as
+        /// it was; `url` is where it goes if the state is gone.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
+    /// Lets the tab's page go, keeping its state under the name the app
+    /// gave it (`TabState::state`). The entry stays, and is woken with
+    /// `tab.create` and that name.
+    #[serde(rename = "tab.discard")]
+    TabDiscard { tab_id: u64 },
+    #[serde(rename = "tab.mute")]
+    TabMute { tab_id: u64, muted: bool },
+    /// The names of every state that still belongs to a tab; the app
+    /// forgets the others.
+    #[serde(rename = "state.keep")]
+    StateKeep { tokens: Vec<String> },
+    /// Scrolls the tab's page: `line-down`, `line-up`, `half-down`,
+    /// `half-up`, `page-down`, `page-up`, `top` or `bottom`.
+    #[serde(rename = "page.scroll")]
+    PageScroll { tab_id: u64, how: String },
+    /// Labels everything on the page that can be followed. Reply: `count`.
+    #[serde(rename = "hints.start")]
+    HintsStart { tab_id: u64 },
+    /// What has been typed of a label so far. Reply: `count` labels still
+    /// match; `done` when one was followed; `url` when it is a link to open
+    /// in a new tab; `focus` when it is a field that wants the keyboard.
+    #[serde(rename = "hints.type")]
+    HintsType { tab_id: u64, typed: String, new_tab: bool },
+    #[serde(rename = "hints.stop")]
+    HintsStop { tab_id: u64 },
+    /// The cells the TUI draws over the page. While set, the app shows a
+    /// still of the page with these cells cut out of it.
+    #[serde(rename = "overlay.set")]
+    OverlaySet { col: u16, row: u16, cols: u16, rows: u16 },
+    #[serde(rename = "overlay.clear")]
+    OverlayClear,
+    /// Where the app lays the icons of sites: two cells each.
+    #[serde(rename = "icons.set")]
+    IconsSet { icons: Vec<IconCell> },
+    /// Switches content blocking off for the site of the tab's page, or
+    /// back on. Reply: `site` and `active`.
+    #[serde(rename = "blocking.toggle")]
+    BlockingToggle { tab_id: u64 },
     #[serde(rename = "tab.close")]
     TabClose { tab_id: u64 },
     #[serde(rename = "tab.activate")]
@@ -121,6 +164,15 @@ pub enum Request {
     Shutdown,
 }
 
+/// The first of the two cells an icon is laid over, and whose icon it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IconCell {
+    pub col: u16,
+    pub row: u16,
+    /// The site's address: scheme and host.
+    pub url: String,
+}
+
 pub fn encode(id: u64, request: &Request) -> String {
     let mut value = serde_json::to_value(request).expect("request serialises");
     value
@@ -151,6 +203,12 @@ pub struct TabState {
     pub camera: Option<bool>,
     /// The page holds the microphone (muted or not).
     pub microphone: Option<bool>,
+    /// The page is making sound.
+    pub audible: Option<bool>,
+    /// The page's sound is switched off.
+    pub muted: Option<bool>,
+    /// The name the app keeps the tab's state under.
+    pub state: Option<String>,
 }
 
 /// A download, running or past, as the app reports it.
@@ -433,13 +491,22 @@ mod tests {
         );
         assert_eq!(enc(Request::TabList), json!({"id": 5, "method": "tab.list"}));
         assert_eq!(
-            enc(Request::TabCreate { url: Some("https://a.b".into()), input: None, activate: true, profile: None }),
+            enc(Request::TabCreate { url: Some("https://a.b".into()), input: None, activate: true, profile: None, state: None }),
             json!({"id": 5, "method": "tab.create", "url": "https://a.b", "activate": true})
         );
         assert_eq!(
-            enc(Request::TabCreate { url: None, input: Some("a.b".into()), activate: false, profile: Some("work".into()) }),
-            json!({"id": 5, "method": "tab.create", "input": "a.b", "activate": false, "profile": "work"})
+            enc(Request::TabCreate { url: None, input: Some("a.b".into()), activate: false, profile: Some("work".into()), state: Some("t1".into()) }),
+            json!({"id": 5, "method": "tab.create", "input": "a.b", "activate": false, "profile": "work", "state": "t1"})
         );
+        assert_eq!(
+            enc(Request::HintsType { tab_id: 3, typed: "sa".into(), new_tab: true }),
+            json!({"id": 5, "method": "hints.type", "tab_id": 3, "typed": "sa", "new_tab": true})
+        );
+        assert_eq!(
+            enc(Request::IconsSet { icons: vec![IconCell { col: 1, row: 4, url: "https://a.b".into() }] }),
+            json!({"id": 5, "method": "icons.set", "icons": [{"col": 1, "row": 4, "url": "https://a.b"}]})
+        );
+        assert_eq!(enc(Request::OverlayClear), json!({"id": 5, "method": "overlay.clear"}));
         assert_eq!(
             enc(Request::TabNavigate { tab_id: 3, input: "swift concurrency".into() }),
             json!({"id": 5, "method": "tab.navigate", "tab_id": 3, "input": "swift concurrency"})

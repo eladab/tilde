@@ -54,25 +54,45 @@ pub struct TabEntry {
     pub recorded_url: String,
     /// The app's `entry` number of the page `recorded_url` belongs to.
     pub recorded_entry: Option<u64>,
+    /// The page is making sound.
+    pub audible: bool,
+    /// The page's sound is switched off.
+    pub muted: bool,
+    /// The name the app keeps the tab's state under: its pages back and
+    /// forward and where it was scrolled to. A tab that is not loaded is
+    /// brought back from it.
+    pub state: Option<String>,
+    /// Since when the tab has been out of sight; `None` while it is showing.
+    pub left_at: Option<Instant>,
 }
 
 impl TabEntry {
     /// Puts a tab whose page is gone back to its not-yet-loaded state.
     pub(crate) fn unload(&mut self) {
-        self.tab_id = None;
-        self.pending = false;
-        self.loading = false;
-        self.crashed = false;
-        self.camera = false;
-        self.microphone = false;
-        self.can_go_back = false;
-        self.can_go_forward = false;
+        self.sleep();
+        // Its pages back and forward went with it.
+        self.state = None;
         if let Some(url) = self.pin_url.clone().filter(|_| self.pinned) {
             if self.url != url {
                 self.url = url;
                 self.title.clear();
             }
         }
+    }
+
+    /// The tab's page is let go, to come back as it was: the address, the
+    /// title and the name of its kept state stay.
+    pub(crate) fn sleep(&mut self) {
+        self.tab_id = None;
+        self.pending = false;
+        self.loading = false;
+        self.crashed = false;
+        self.camera = false;
+        self.microphone = false;
+        self.audible = false;
+        self.muted = false;
+        self.can_go_back = false;
+        self.can_go_forward = false;
     }
 
     pub fn label(&self) -> String {
@@ -149,6 +169,18 @@ impl TabEntry {
         }
         if let Some(v) = state.microphone {
             self.microphone = v;
+        }
+        if let Some(v) = state.audible {
+            self.audible = v;
+        }
+        if let Some(v) = state.muted {
+            self.muted = v;
+        }
+        if let Some(token) = state.state.as_ref().filter(|t| !t.is_empty()) {
+            if self.state.as_ref() != Some(token) {
+                self.state = Some(token.clone());
+                changed = true;
+            }
         }
         changed
     }
@@ -335,6 +367,11 @@ pub(crate) enum Pending {
     Hello,
     TabList,
     Create { key: u64 },
+    /// A tab opened behind the one showing.
+    CreateQuiet { key: u64 },
+    HintsStart { tab_id: u64 },
+    HintsType { tab_id: u64 },
+    Blocking,
     DownloadList,
     /// The requests of a tab the dev tools began to watch.
     NetWatch { tab_id: Option<u64> },
@@ -490,6 +527,22 @@ pub struct App {
     pub(crate) orphans: HashSet<u64>,
     /// Entry that should take page focus once its tab exists.
     pub(crate) focus_on_create: Option<u64>,
+    /// The command palette, while it is open.
+    pub palette: Option<crate::palette::CommandPalette>,
+    /// Labels are on the page, waiting for one to be typed.
+    pub hints: Option<crate::reach::Hints>,
+    /// Tabs closed in this run, oldest first; the last can be reopened.
+    pub closed: Vec<crate::reach::ClosedTab>,
+    /// A filter typed into the History view.
+    pub history_filter: String,
+    /// The filter is being typed.
+    pub history_typing: bool,
+    /// After how long a tab out of sight is put to sleep; `None` is never.
+    pub discard_after: Option<Duration>,
+    pub(crate) last_discard_check: Option<Instant>,
+    /// The cells the app has been told are drawn over the page.
+    pub(crate) overlay_sent: Option<Rect>,
+    pub(crate) icons_sent: Vec<crate::protocol::IconCell>,
 }
 
 impl App {
@@ -521,6 +574,7 @@ impl App {
             confirm_clear: false,
             downloads: Vec::new(),
             downloads_unseen: false,
+            discard_after: crate::reach::discard_after(session_path.as_deref()),
             history: session_path.as_deref().map(|p| History::load(&crate::history::path_beside(p))).unwrap_or_default(),
             now_override: None,
             frame: 0,
@@ -539,6 +593,14 @@ impl App {
             viewport_sent: None,
             orphans: HashSet::new(),
             focus_on_create: None,
+            palette: None,
+            hints: None,
+            closed: Vec::new(),
+            history_filter: String::new(),
+            history_typing: false,
+            last_discard_check: None,
+            overlay_sent: None,
+            icons_sent: Vec::new(),
         }
     }
 
@@ -571,6 +633,8 @@ impl App {
             // What the dev tools need follows from the state just reached.
             self.dev_sync();
             self.find_follows_tab();
+            self.hints_follow_tab();
+            self.sync_overlay();
             if self.inbox.is_empty() {
                 break;
             }
@@ -640,6 +704,8 @@ impl App {
             self.clamp_scroll();
         }
         self.dev_prepare();
+        self.sync_icons();
+        self.sync_overlay();
         self.pump();
     }
 
@@ -705,6 +771,28 @@ impl App {
             Pending::Notify => {
                 if !response.ok {
                     self.message = response.error;
+                }
+            }
+            Pending::HintsStart { tab_id } => self.hints_started(tab_id, response),
+            Pending::HintsType { tab_id } => self.hints_typed(tab_id, response),
+            Pending::Blocking => self.blocking_toggled(response),
+            Pending::CreateQuiet { key } => {
+                let tab_id = response.body["tab_id"].as_u64().filter(|_| response.ok);
+                if self.orphans.remove(&key) {
+                    if let Some(tab_id) = tab_id {
+                        self.request(Request::TabClose { tab_id });
+                    }
+                    return;
+                }
+                let entry = match self.index_of_key(key) {
+                    Some(index) => Some(&mut self.tabs[index]),
+                    None => self.spaces.iter_mut().flat_map(|s| s.tabs.iter_mut()).find(|t| t.key == key),
+                };
+                if let Some(entry) = entry {
+                    entry.pending = false;
+                    entry.tab_id = tab_id;
+                    entry.loading = tab_id.is_some();
+                    self.session_dirty = true;
                 }
             }
             Pending::NetWatch { tab_id } => self.net_watched(tab_id, response),
@@ -870,6 +958,10 @@ impl App {
                 if mode == Mode::Page {
                     self.cancel_edit();
                     self.message = None;
+                    // The page was clicked: the labels on it are in the way.
+                    if self.hints.as_ref().is_some_and(|h| h.count.is_some()) {
+                        self.drop_hints();
+                    }
                 }
             }
             Event::DownloadUpdated(download) => self.download_updated(download),
@@ -887,11 +979,16 @@ impl App {
         }
     }
 
-    fn on_command(&mut self, name: &str, arg: Option<i64>, text: Option<String>) {
+    pub(crate) fn on_command(&mut self, name: &str, arg: Option<i64>, text: Option<String>) {
         if name == "copy" {
             // The terminal has no selection of its own to copy: the text
             // field is drawn by us, so Cmd+C copies what is in it.
-            let field = self.edit.as_ref().or(self.find.as_ref().filter(|_| self.find_has_keys()).map(|f| &f.edit));
+            let field = self
+                .palette
+                .as_ref()
+                .map(|p| &p.edit)
+                .or(self.edit.as_ref())
+                .or(self.find.as_ref().filter(|_| self.find_has_keys()).map(|f| &f.edit));
             if let Some(text) = field.map(|e| e.text.clone()).filter(|t| !t.is_empty()) {
                 self.request(Request::ClipboardSet { text });
             } else if self.dev_has_keys() {
@@ -902,9 +999,26 @@ impl App {
         if name == "clear-line" {
             // Cmd+Delete, which the terminal has no encoding for: it clears
             // the text field being typed in, as Ctrl+U does.
-            let typing = self.form.is_some() || self.edit.is_some() || self.find_has_keys() || (self.dev.search.is_some() && self.dev_has_keys());
-            if typing && !self.help && self.view.is_none() && !self.confirm_delete {
+            let typing = self.form.is_some()
+                || self.edit.is_some()
+                || self.palette.is_some()
+                || self.history_typing
+                || self.find_has_keys()
+                || (self.dev.search.is_some() && self.dev_has_keys());
+            if typing && !self.help && (self.view.is_none() || self.history_typing) && !self.confirm_delete {
                 self.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            }
+            return;
+        }
+        if name == "palette" {
+            return self.toggle_palette();
+        }
+        // Any other command is meant for what the palette is in front of.
+        if self.dismiss_palette() {
+            self.on_command(name, arg, text);
+            // The page gets its keys back, unless the command took them.
+            if self.edit.is_none() && self.find.is_none() && self.hints.is_none() && !self.overlay_open() && !self.dev_has_keys() {
+                self.focus_page();
             }
             return;
         }
@@ -924,6 +1038,12 @@ impl App {
         }
         match name {
             "find" => self.open_find(text.filter(|t| !t.trim().is_empty())),
+            "hints" => self.start_hints(false),
+            "hints-new" => self.start_hints(true),
+            "reopen-tab" => self.reopen_tab(),
+            "toggle-mute" => self.toggle_mute(),
+            "toggle-blocking" => self.toggle_blocking(),
+            "sleep-others" => self.sleep_other_tabs(),
             "find-next" => self.find_step(false),
             "find-prev" => self.find_step(true),
             "toggle-mode" => {
@@ -1024,7 +1144,7 @@ impl App {
                     self.tabs[self.selected].loading = true;
                     let profile = self.engine_profile();
                     self.send(
-                        Request::TabCreate { url: Some(entry.url), input: None, activate: true, profile },
+                        Request::TabCreate { url: Some(entry.url), input: None, activate: true, profile, state: entry.state },
                         Pending::Create { key: entry.key },
                     );
                 }
@@ -1074,6 +1194,8 @@ impl App {
 
     /// Opens the selected tab once the selection has rested on it long enough.
     pub fn tick(&mut self, now: Instant) {
+        self.rest_idle_tabs(now);
+        self.pump();
         let Some((key, at)) = self.load_due else { return };
         let selected = self.tabs.get(self.selected).is_some_and(|entry| entry.key == key);
         if selected && now < at {
@@ -1203,7 +1325,9 @@ impl App {
                 self.focus_on_create = Some(entry.key);
                 self.tabs[index].pending = true;
                 let profile = self.engine_profile();
-                self.send(Request::TabCreate { url: None, input: Some(input), activate: true, profile }, Pending::Create { key: entry.key });
+                // Another address: what the tab was before is of no more use.
+                self.tabs[index].state = None;
+                self.send(Request::TabCreate { url: None, input: Some(input), activate: true, profile, state: None }, Pending::Create { key: entry.key });
             }
         }
         self.session_dirty = true;
@@ -1222,6 +1346,9 @@ impl App {
             self.request(Request::TabClose { tab_id });
         } else if entry.pending {
             self.orphans.insert(entry.key);
+        }
+        if !entry.pinned {
+            self.remember_closed(&entry);
         }
         if entry.pinned {
             // Closing a pinned tab frees its page but keeps the pin.
@@ -1417,6 +1544,8 @@ impl App {
         if self.help {
             // Any key puts the page back.
             self.close_help();
+        } else if self.palette.is_some() {
+            self.handle_palette_key(key);
         } else if self.view.is_some() {
             self.handle_view_key(key);
         } else if self.form.is_some() {
@@ -1425,6 +1554,8 @@ impl App {
             self.handle_confirm_key(key);
         } else if self.edit.is_some() {
             self.handle_edit_key(key);
+        } else if self.hints_have_keys() {
+            self.handle_hint_key(key);
         } else if self.find_has_keys() {
             self.handle_find_key(key);
         } else if self.dev_has_keys() {
@@ -1440,6 +1571,25 @@ impl App {
         match key.code {
             KeyCode::Char('c') if ctrl => self.quit(),
             KeyCode::Char('l') if ctrl => self.start_edit(),
+            // The page is scrolled from here, and its links followed,
+            // without handing it the keys.
+            KeyCode::Char('d') if ctrl => self.scroll_page("half-down"),
+            KeyCode::Char('u') if ctrl => self.scroll_page("half-up"),
+            KeyCode::Char('e') if ctrl => self.scroll_page("line-down"),
+            KeyCode::Char('y') if ctrl => self.scroll_page("line-up"),
+            KeyCode::Char('f') if ctrl => self.scroll_page("page-down"),
+            KeyCode::Char('b') if ctrl => self.scroll_page("page-up"),
+            KeyCode::Char(' ') | KeyCode::PageDown => self.scroll_page("page-down"),
+            KeyCode::PageUp => self.scroll_page("page-up"),
+            KeyCode::Char('g') | KeyCode::Home => self.scroll_page("top"),
+            KeyCode::Char('G') | KeyCode::End => self.scroll_page("bottom"),
+            KeyCode::Char('f') => self.start_hints(false),
+            KeyCode::Char('F') => self.start_hints(true),
+            KeyCode::Char(':') => self.open_palette(""),
+            KeyCode::Char('>') => self.open_palette(">"),
+            KeyCode::Char('/') => self.open_find(None),
+            KeyCode::Char('u') => self.reopen_tab(),
+            KeyCode::Char('m') => self.toggle_mute(),
             KeyCode::Char('j') | KeyCode::Down => self.step(1, false),
             KeyCode::Char('k') | KeyCode::Up => self.step(-1, false),
             KeyCode::Enter | KeyCode::Char('i') => self.focus_page(),
@@ -1497,7 +1647,11 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
-        if self.form.is_some() {
+        if self.palette.is_some() {
+            self.palette_paste(text);
+        } else if self.history_typing {
+            self.history_filter_paste(text);
+        } else if self.form.is_some() {
             self.handle_paste_into_form(text);
         } else if let Some(edit) = self.edit.as_mut() {
             edit.completion = None;
@@ -1512,6 +1666,13 @@ impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let (col, row) = (mouse.column, mouse.row);
         let layout = self.layout;
+        if self.palette.is_some() {
+            // The palette is in front of everything else.
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.palette_click(col, row);
+            }
+            return self.pump();
+        }
         if contains(layout.devtools, col, row) {
             self.dev_mouse(mouse.kind, col, row);
             return self.pump();

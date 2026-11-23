@@ -24,6 +24,10 @@ pub struct SessionTab {
     /// A name the user gave the tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The name the app keeps the tab's state under (its pages back and
+    /// forward), from which the tab is brought back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// A space: its own tabs, colour and profile.
@@ -150,6 +154,7 @@ mod tests {
                     pin_url: Some("https://a.example".into()),
                     pin_title: Some("A Mail".into()),
                     name: Some("Mail".into()),
+                    state: Some("1f0e".into()),
                 },
                         SessionTab { url: "https://b.example".into(), ..Default::default() },
                     ],

@@ -408,6 +408,124 @@ def devtools_checks(d):
     server.shutdown()
 
 
+def reach_checks(d):
+    """Scrolling and following links from NAV, the palette, dialogs, blocking, sleep."""
+    check("pages are told the Safari version of this Mac", state(d)["user_agent"] in (js(d, "navigator.userAgent") or ""))
+
+    open_tab(d, "data:text/html,<title>reach</title><body style='margin:0'><a id=l href='https://example.org/' style='display:block;font-size:30px'>link</a>"
+                "<button id=b onclick=\"document.title='pressed'\" style='font-size:30px'>press</button><input id=i style='font-size:30px'>"
+                "<div style='height:6000px'></div>")
+    wait(d, lambda s: active(s)["title"] == "reach" and s["mode"] == "page", "reach page")
+    nav(d)
+    reach_tab = state(d)["active"]
+
+    def scrolled(test, what):
+        end = time.time() + 5
+        while time.time() < end:
+            if test(float(js(d, "scrollY") or 0)):
+                return True
+            time.sleep(0.2)
+        return False
+    typ(d, "G")
+    down = scrolled(lambda y: y > 3000, "bottom")
+    typ(d, "g")
+    up = scrolled(lambda y: y == 0, "top")
+    typ(d, "\x04")
+    half = scrolled(lambda y: 100 < y < 3000, "half a page")
+    check("G, g and Ctrl+D scroll the page from NAV mode", down and up and half and state(d)["mode"] == "nav",
+          f"{down} {up} {half}")
+    typ(d, "g"); scrolled(lambda y: y == 0, "top")
+
+    # Hints: the link is S, the button A, the field D.
+    typ(d, "f")
+    text = wait_screen(d, lambda t: "HINT" in t and "3 labels" in t, "labels on the page")
+    check("f labels what can be followed", "3 labels" in text)
+    typ(d, "a")
+    wait(d, lambda s: active(s)["title"] == "pressed", "the button was pressed")
+    check("typing a label presses its button, and the keys stay with the tabs", state(d)["mode"] == "nav")
+    typ(d, "f"); wait_screen(d, lambda t: "3 labels" in t, "labels again"); typ(d, "d")
+    wait(d, lambda s: s["mode"] == "page", "a field takes the keys")
+    check("a field's label gives the page the keys, in the field", js(d, "document.activeElement.id") == "i")
+    nav(d)
+    count = len(state(d)["tabs"])
+    typ(d, "F"); wait_screen(d, lambda t: "3 labels" in t, "labels for a new tab"); typ(d, "s")
+    s = wait(d, lambda s: len(s["tabs"]) == count + 1, "a link opened behind")
+    check("F opens a link in a tab behind this one", s["active"] == reach_tab)
+    typ(d, "j"); wait(d, lambda s: s["active"] != reach_tab, "the tab behind"); typ(d, "x")
+    # Closing a tab shows the one after it, when there is one.
+    if wait(d, lambda s: len(s["tabs"]) == count and s.get("active"), "the tab behind closed")["active"] != reach_tab:
+        typ(d, "k")
+    wait(d, lambda s: s["active"] == reach_tab, "back on the reach tab")
+
+    # The palette is drawn over a still of the page.
+    key(d, "P", "cmd+shift", 35)
+    s = wait(d, lambda s: s["overlay"] and s["covered"] and s["web_hidden"], "palette over the page")
+    check("the palette opens over a still of the page", "Find a tab" in screen(d))
+    typ(d, "\x1b")
+    s = wait(d, lambda s: not s["overlay"] and not s["covered"] and s["web_hidden"] is False, "the page again")
+    check("closing the palette puts the page back", True)
+
+    # A page's dialogs are shown and answered.
+    js(d, "setTimeout(() => { window.__sure = confirm('sure?') }, 0); 1")
+    wait(d, lambda s: s["sheet"], "the page's confirm is shown")
+    d.call("debug.sheet", accept=True)
+    wait(d, lambda s: not s["sheet"], "the sheet is gone")
+    time.sleep(0.3)
+    check("confirm() is asked and its answer reaches the page", js(d, "String(window.__sure)") == "true")
+
+    # Sound.
+    typ(d, "m")
+    wait(d, lambda s: active(s)["muted"], "muted")
+    typ(d, "m")
+    wait(d, lambda s: not active(s)["muted"], "unmuted")
+    check("m mutes and unmutes the tab", True)
+
+    # A closed tab comes back with its pages back and forward.
+    js(d, "location.hash = 'two'; 1")
+    wait(d, lambda s: active(s)["can_go_back"], "a second page in the tab")
+    typ(d, "x")
+    wait(d, lambda s: len(s["tabs"]) == count - 1, "the reach tab closed")
+    typ(d, "u")
+    s = wait(d, lambda s: len(s["tabs"]) == count and active(s)["url"].endswith("#two") and active(s)["can_go_back"],
+             "the closed tab reopened with its history")
+    check("u reopens the closed tab with its pages back and forward", True)
+
+    # Requests to advertising networks from another site's page are blocked.
+    typ(d, "o")
+    typ(d, "data:text/html,<title>ads</title><script src='https://www.googletagmanager.com/gtag/js?id=G-TILDE' "
+           "onerror=\"document.title='blocked'\" onload=\"document.title='loaded'\"></script>")
+    typ(d, "\r")
+    s = wait(d, lambda s: active(s)["title"] in ("blocked", "loaded"), "the tracker's script was decided")
+    check("a third-party request to a tracker is blocked", active(s)["title"] == "blocked")
+    nav(d)
+
+    # The icons of sites are laid beside the tabs.
+    s = wait(d, lambda s: s["icon_cells"] > 0, "icon cells")
+    try:
+        s = wait(d, lambda s: s["icons_shown"] > 0, "an icon", timeout=15)
+    except SystemExit:
+        pass
+    check("the sidebar shows the icons of sites", state(d)["icons_shown"] > 0, str(state(d)["icons_shown"]))
+
+    # Sleep: the other tabs' pages are let go, and come back when shown.
+    loaded = len(state(d)["tabs"])
+    listed = sum(len(space["tabs"]) for space in wait_session(lambda j: True, "session")["spaces"])
+    key(d, "P", "cmd+shift", 35)
+    wait(d, lambda s: s["overlay"], "palette")
+    typ(d, ">sleep"); typ(d, "\r")
+    s = wait(d, lambda s: len(s["tabs"]) < loaded and not s["overlay"], "other tabs asleep")
+    check("the other tabs are put to sleep, and the tabs stay in the sidebar",
+          sum(len(space["tabs"]) for space in wait_session(lambda j: True, "session")["spaces"]) == listed,
+          f"{len(s['tabs'])} of {loaded} loaded")
+    asleep = len(s["tabs"])
+    typ(d, "k")
+    s = wait(d, lambda s: len(s["tabs"]) == asleep + 1 and active(s)["url"] and not active(s)["loading"], "a sleeping tab wakes")
+    check("a sleeping tab wakes when it is shown", True)
+    typ(d, "j")
+    wait(d, lambda s: active(s)["title"] in ("blocked", "loaded", "ads"), "back on the last tab")
+    typ(d, "x"); time.sleep(0.5)
+
+
 def open_tab(d, text):
     key(d, "t", "cmd", 17)
     wait(d, lambda s: s["mode"] == "nav" and s.get("web_hidden") is True, "new tab bar")
@@ -738,6 +856,9 @@ def main():
 
     # Dev tools: network and storage
     devtools_checks(d)
+
+    # The keyboard's reach into the page, the palette, dialogs, blocking, sleep
+    reach_checks(d)
 
     # Quit and restore
     time.sleep(1)

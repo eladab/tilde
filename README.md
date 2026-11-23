@@ -11,7 +11,10 @@ scrolling, IME.
 
 > Status: phase 1 is built, plus spaces (separate sets of tabs with their own
 > colour and profile), pinned tabs, tab renaming, a sidebar toggle, downloads,
-> history, dev tools (network and storage) and a key reference. See [docs/HANDOFF-phase-1.md](docs/HANDOFF-phase-1.md)
+> history, dev tools (network and storage), a key reference, following links
+> and scrolling from the keyboard, a command palette, content blocking, tabs
+> that sleep and come back as they were, and the dialogs pages ask for. See
+> [docs/HANDOFF-phase-1.md](docs/HANDOFF-phase-1.md) for the protocol and
 > for what is and is not verified.
 
 ```
@@ -111,7 +114,11 @@ WebKit for sites like WhatsApp Web) return after each rebuild.
 The disk image is signed with the same identity but is not notarized, so on a
 Mac other than the one that built it Gatekeeper refuses it until the user
 allows it in System Settings → Privacy & Security. Distributing it properly
-needs a Developer ID certificate and notarization.
+needs a Developer ID certificate and notarization. The steps are written
+down but have not been run, for want of a Developer ID: build with
+`TILDE_HARDENED=1` and the Developer ID as `TILDE_SIGN_IDENTITY`, then
+`scripts/notarize.sh` (it says what it needs). The release workflow does not
+do this yet.
 
 With [`just`](https://github.com/casey/just) installed: `just run`, `just test`,
 `just dev` (debug build, no bundle), `just mock` (the TUI alone against a fake
@@ -149,8 +156,14 @@ In NAV mode:
 |---|---|
 | `j` / `k` | Next / previous tab |
 | `Enter` or `i` | Go to the page |
+| `f` / `F` | Follow a link by its label / open it in a new tab behind this one |
+| `Space`, `Ctrl+D` / `Ctrl+U` | Scroll the page down a screenful / by half a screenful |
+| `Ctrl+E` / `Ctrl+Y`, `g` / `G` | Scroll by a line / to the top, the bottom |
+| `:` / `>` | Command palette / commands only |
+| `/` | Find in the page |
 | `o` | Edit the URL |
-| `t` / `x` | New tab / close tab |
+| `t` / `x` / `u` | New tab / close tab / reopen the tab closed last |
+| `m` | Mute or unmute the tab |
 | `H` / `L` | Back / forward |
 | `r` | Reload, or stop while loading |
 | `J` / `K` | Move the tab down / up (within its section) |
@@ -176,10 +189,131 @@ and smaller (`Cmd+0` restores its actual size, and pinching on the trackpad
 zooms too), `Cmd+D` pins or unpins, `Cmd+Shift+H` returns to
 the pinned page, `Cmd+Y` shows the history, `Opt+Cmd+L` the downloads, `Opt+Cmd+I` the dev tools, `Cmd+/` the key reference, `Opt+Cmd+←` and `Opt+Cmd+→`
 switch space, `Ctrl+1`…`Ctrl+9` select one, `Cmd+Shift+N` makes a new one.
+`Cmd+Shift+P` opens the command palette, `Cmd+J` labels the page's links
+(`Cmd+Shift+J` to open one in a new tab), `Cmd+Shift+T` reopens the tab closed
+last, `Opt+Cmd+M` mutes or unmutes the tab.
 `Cmd+\` fills the focused page field from the macOS Passwords app: pick a login
 in the system picker, then its username or password.
 Cmd-click opens a link in a background tab. Rename is in the Tabs menu; editing
 and deleting spaces are in the Spaces menu.
+
+### The page from the keyboard
+
+In NAV mode the page can be read and used without being given the keys.
+
+**Scrolling.** `Space` and `Ctrl+F` go down a screenful, `Ctrl+B` up;
+`Ctrl+D` / `Ctrl+U` half a screenful; `Ctrl+E` / `Ctrl+Y` a line; `g` and `G`
+the top and the bottom. In an application that scrolls a pane of its own, the
+pane under the middle of the window is the one that moves.
+
+**Following links.** `f` puts a short label on every link, button and field
+on screen, and the status line says `HINT`. Type a label: a link is followed,
+a button pressed, and a field is given the keys (PAGE mode) with the cursor
+in it. `F` does the same but opens a link in a new tab behind the one
+showing. `Backspace` takes back a letter, `Esc` takes the labels down. From
+the page, `Cmd+J` and `Cmd+Shift+J` do this and hand the keys back
+afterwards.
+
+Labels are put on what is in the page's top frame, including inside shadow
+roots; what is inside an embedded frame is not reached. The script that
+draws them runs apart from the page's own, and nothing is put in a page until
+one of these keys is first used on it.
+
+### Command palette
+
+`:` (or `Cmd+Shift+P`, from the page too) opens one field that finds:
+
+- **a tab**, in any space, by its name or address: `Enter` goes to it;
+- **a page from the history**, once something is typed, the pages gone to
+  most often first: `Enter` opens it in a new tab;
+- **a closed tab**: `Enter` reopens it as it was;
+- **a command**, by name, with its key shown beside it; `>` lists commands only;
+- or, failing all of those, **opens what was typed** as an address or a search.
+
+Every word typed must be found; the start of a word counts for more than its
+middle, and a title for more than an address. `↑` / `↓` (or `Ctrl+P` /
+`Ctrl+N`) move, `Esc` closes.
+
+The palette is drawn over the page. Nothing can really be drawn over a web
+view, so while it is open the app shows a still of the page, dimmed, with the
+palette's cells cut out of it.
+
+### Tabs that sleep
+
+A tab that has been out of sight for 30 minutes is put to sleep: its page is
+let go, which gives its memory back, and the tab stays in the sidebar, shown
+fainter. Selecting it brings the page back as it was: the same pages back and
+forward, scrolled to the same place. Pinned tabs never sleep (they are the
+ones kept open on purpose), nor does a tab that is playing sound, using the
+camera or the microphone, or still loading. **Put the Other Tabs to Sleep**
+(Tabs menu, or the palette) does it at once.
+
+The same kept state is what makes `u` (`Cmd+Shift+T`) reopen a closed tab
+with its history, and what restores every tab's pages back and forward after
+a restart. States are files in `tabstate/` beside the session; those of tabs
+that no longer exist are removed at launch.
+
+The time is `discard_after_minutes` in `settings.json` (see
+[Settings](#settings)); `0` never puts a tab to sleep.
+
+### Content blocking
+
+Requests to advertising and tracking networks are blocked, in WebKit itself
+(`WKContentRuleList`): a blocked request is never made and its script never
+runs. Only requests from another site's page are blocked, so a network's own
+site still opens.
+
+The rules come from a short list built into Tilde and from
+[Peter Lowe's list of ad and tracking servers](https://pgl.yoyo.org/adservers/),
+fetched once a week and kept in `blocklist.txt` beside the session. A site
+that breaks can be exempted: **Content Blocking On or Off for This Site** in
+the View menu or the palette, which reloads the page and is remembered
+(`blocking.json`). `settings.json` can switch blocking off altogether or name
+another list.
+
+This blocks by domain. It does not hide the empty spaces ads leave, and it
+does not read the element-hiding rules of lists such as EasyList.
+
+### What pages ask for
+
+- `alert`, `confirm` and `prompt` are sheets on the window, headed by the
+  site that asks. From its third dialog on, a page can be told to show no
+  more until the tab goes elsewhere.
+- A file field (`<input type=file>`) opens the system's file picker.
+- A site that asks for a name and password (HTTP authentication) gets a
+  sheet for them; they are kept while Tilde runs, not on disk.
+- A site that asks for a client certificate is shown the identities in the
+  keychain to choose from.
+
+### Sound, zoom and icons
+
+A tab that is playing sound shows `♪` at the end of its row; `m` (or
+`Opt+Cmd+M`) mutes it, and it then says `♪ off`.
+
+Page zoom is remembered per site (`zoom.json`): a site made larger is larger
+in every tab and after a restart.
+
+The sidebar shows each site's icon before the tab's name. A terminal cannot
+draw a picture, so the TUI tells the app which cells belong to which site and
+the app lays the icons over them. Icons are fetched apart from the page, with
+no cookies, and kept in `icons/` beside the session.
+
+### Settings
+
+`~/Library/Application Support/tilde/settings.json` is optional, and so is
+every key in it:
+
+```json
+{
+  "discard_after_minutes": 30,
+  "content_blocking": true,
+  "blocklist_url": "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=nohtml&showintro=0&mimetype=plaintext"
+}
+```
+
+`blocklist_url` must be `https` and may be a list of domains, one per line,
+or a hosts file; an empty string fetches nothing. Changes take effect at the
+next launch.
 
 ### Default browser
 
@@ -220,7 +354,8 @@ one is a matter of drawing it there.
 
 Deleting a space closes its tabs. The profile's data stays on disk, so a space
 made later with the same profile name is signed in again. There is no way yet
-to move a tab between spaces or to erase a profile.
+to move a tab between spaces or to erase a profile. The command palette finds
+and goes to a tab of any space.
 
 ### Pinned tabs
 
@@ -270,6 +405,7 @@ latest time.
 | Key | Action |
 |---|---|
 | `j` / `k`, `g` / `G`, `Ctrl+D` / `Ctrl+U` | Move by line, to either end, by screenful |
+| `/` | Filter: only pages whose title or address has every word typed. `Enter` goes back to the list, `Esc` drops the filter |
 | `Enter` | Open the page in a new tab of the current space |
 | `s` | Open it in a new tab of the space it was visited in |
 | `x` | Forget this visit |
@@ -277,7 +413,7 @@ latest time.
 | `Esc` | Close the view |
 
 Restoring tabs at launch is not a visit, and neither are blank or `data:` pages.
-The newest 10,000 visits are kept. There is no search yet.
+The newest 10,000 visits are kept. The command palette searches them too.
 
 Both views take the place of the page, like the key reference, and a click on a
 line selects it (a second click opens it).
@@ -402,9 +538,10 @@ and deleted, not edited.
 The key reference (`?`) is shown in the page area, since nothing can be drawn
 over the page; any key puts the page back.
 
-Files: session, `history.json` and `downloads.json` in
-`~/Library/Application Support/tilde/`, logs in
-`~/Library/Logs/tilde/`.
+Files: session, `history.json`, `downloads.json`, `permissions.json`,
+`zoom.json`, `blocking.json`, `blocklist.txt`, the optional `settings.json`
+and the folders `tabstate/` and `icons/` in
+`~/Library/Application Support/tilde/`, logs in `~/Library/Logs/tilde/`.
 
 ## Requirements
 
@@ -417,9 +554,9 @@ Files: session, `history.json` and `downloads.json` in
 | Phase | Theme | Contents |
 |---|---|---|
 | 1 (built) | Foundation | App shell with embedded terminal, engine, TUI. Vertical tab list, URL bar, back/forward/reload, NAV/PAGE modes, session restore. See the handoff. |
-| 2 | Daily driver | Command palette, URL autocomplete from history, find in page, resuming downloads, JS dialogs / HTTP auth / file pickers, context menu actions, favicons in the sidebar, TUI popups over the page (page swapped for a still snapshot while they are open) |
+| 2 (built, but for two items) | Daily driver | Command palette, URL autocomplete from history, find in page, JS dialogs / HTTP auth / file pickers, favicons in the sidebar, the palette over a still of the page, link hints and scrolling from NAV, tabs that sleep, reopening closed tabs. Still to do: resuming downloads, context menu actions |
 | 3 | Arc-style organisation | Folders, favourites, tab archiving, split view (several web views), peek windows, moving tabs between spaces, erasing a profile, multiple windows |
-| 4 | Power features | Content blocking (`WKContentRuleList`), userscripts / per-site styles, WebExtensions (`WKWebExtension`), reader mode, picture-in-picture, the rest of the dev tools (console, elements; full request capture through a local proxy), passkeys and password autofill, themes and font configuration |
+| 4 | Power features | Content blocking by domain is built; element hiding is not. Userscripts / per-site styles, WebExtensions (`WKWebExtension`), reader mode, picture-in-picture, the rest of the dev tools (console, elements; full request capture through a local proxy), passkeys, themes and font configuration, link hints inside frames |
 | 5 | Beyond the app | Running the TUI in the user's own terminal (overlay or in-band frame streaming), remote use |
 
 ## Repository layout
@@ -432,11 +569,13 @@ tilde/
 │   └── spike-notes.md       what the first spike established
 ├── app/                     Swift package → Tilde.app
 │   └── Sources/
-│       ├── TildeCore/        URL-bar resolution, wire format, request log (unit tested)
-│       └── Tilde/            window, terminal host, tab store, socket server, dev tools' network and storage
+│       ├── TildeCore/        URL-bar resolution, wire format, request log, blocking rules (unit tested)
+│       └── Tilde/            window, terminal host, tab store, socket server, dev tools' network and storage,
+│                             page keys (scrolling, hints), content blocker, dialogs, tab state, icons
 ├── tui/                     Rust crate → tilde-tui
-│   └── src/                 app logic, views, history, dev tools, drawing, protocol, mock engine
-├── scripts/                 bundle.sh, dmg.sh, release.sh, appcast.sh, test.sh, e2e.py, make-icon.sh
+│   └── src/                 app logic, views, history, palette, reach (hints, sleep, closed tabs), dev tools,
+│                             drawing, protocol, mock engine
+├── scripts/                 bundle.sh, dmg.sh, release.sh, appcast.sh, notarize.sh, test.sh, e2e.py, make-icon.sh
 ├── .github/workflows/       tests on every push; a release on every version tag
 └── justfile                 thin wrappers over scripts/
 ```

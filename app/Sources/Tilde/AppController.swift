@@ -120,14 +120,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         return dir
     }()
 
-    /// Which sites may use the camera and the microphone; kept beside the session.
-    private lazy var mediaPermissions: MediaPermissions = {
-        var dataDir = supportDir
+    /// Where everything but the socket is kept: beside the session.
+    private lazy var dataDir: URL = {
         if let session = ProcessInfo.processInfo.environment["TILDE_SESSION"], !session.isEmpty {
-            dataDir = URL(fileURLWithPath: session).deletingLastPathComponent()
+            return URL(fileURLWithPath: session).deletingLastPathComponent()
         }
-        return MediaPermissions(file: dataDir.appendingPathComponent("permissions.json"))
+        return supportDir
     }()
+
+    /// Which sites may use the camera and the microphone; kept beside the session.
+    private lazy var mediaPermissions = MediaPermissions(file: dataDir.appendingPathComponent("permissions.json"))
+    private lazy var settings = Settings.load(from: dataDir)
+    private lazy var blocker = ContentBlocker(directory: dataDir, settings: settings, store: store)
+    private lazy var states = TabStateStore(directory: dataDir.appendingPathComponent("tabstate"))
+    private lazy var zoomLevels = ZoomStore(file: dataDir.appendingPathComponent("zoom.json"))
+    private lazy var favicons = Favicons(directory: dataDir.appendingPathComponent("icons"))
+
+    /// The cells the TUI draws over the page (the command palette), while it does.
+    private var overlay: CellRect?
+    /// A still of the page with a hole where those cells are; the page
+    /// itself is hidden behind it, since nothing can be drawn over a page.
+    private var cover: PlaceholderView?
+    private var coverTurn = 0
+    /// The icons of sites, laid over the cells the TUI names.
+    private var iconStrip: IconStrip!
+    private var iconCells: [(CellRect, String)] = []
 
     /// The list of downloads lives beside the session; the files go to ~/Downloads.
     private lazy var downloads: DownloadStore = {
@@ -161,6 +178,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             self?.emit("find.result", ["tab_id": tab, "text": text, "count": count, "index": index])
         }
         store.monitor = network
+        store.blocker = blocker
+        store.states = states
+        store.zoom = zoomLevels
+        store.favicons = favicons
+        store.presenter = { [weak self] in self?.window }
+        favicons.onChange = { [weak self] in self?.layoutIcons() }
+        blocker.start()
         network.onUpdate = { [weak self] tab, reset, late, requests in
             self?.emit("net.updated", ["tab_id": tab, "reset": reset, "late": late, "requests": requests])
         }
@@ -219,6 +243,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         host.view.frame = container.bounds
         host.view.autoresizingMask = [.width, .height]
         container.addSubview(host.view)
+        iconStrip = IconStrip(frame: container.bounds)
+        iconStrip.autoresizingMask = [.width, .height]
+        container.addSubview(iconStrip)
 
         applySizeLimits()
         window.center()
@@ -275,6 +302,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         server.onDisconnect = { [weak self] conn in
             guard let self, conn === self.tui else { return }
             self.tui = nil
+            self.overlay = nil
+            self.removeCover()
             // Nothing is left to show the requests to.
             self.network.stop()
             Log.write("tui disconnected")
@@ -344,6 +373,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
         awaitingRestart = true
         pageSuppressed = true
+        overlay = nil
+        iconCells = []
         applyViewport()
         let reason = code.map { "with code \($0)" } ?? "after being killed"
         // The TUI may have died without restoring the terminal: leave the
@@ -428,6 +459,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
 
     func applicationWillTerminate(_ notification: Notification) {
         quitting = true
+        // So that the next launch brings every tab back as it was.
+        store.orderedTabs.forEach(states.save)
         host.terminateProcess()
         server?.stop()
         debugServer?.stop()
@@ -453,12 +486,74 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             let frame = host.frame(for: viewport)
             if web.frame != frame { web.frame = frame }
         }
-        let hidden = !pageShown
+        if !pageShown { removeCover() }
+        layoutCover()
+        let hidden = !pageShown || cover != nil
         if web.isHidden != hidden { web.isHidden = hidden }
         if hidden || placeholder?.frame != web.frame { removePlaceholder() }
         if hidden && currentMode() == .page {
             window.makeFirstResponder(host.view)
         }
+        layoutIcons()
+    }
+
+    // MARK: Drawing over the page
+
+    /// Puts a still of the page in its place, with a hole for the cells the
+    /// TUI is drawing over it, or moves the hole of the still that is there.
+    private func refreshCover() {
+        coverTurn += 1
+        guard overlay != nil, let web = activeWebView, pageShown, web.url != nil else { return removeCover() }
+        if cover != nil { return layoutCover() }
+        let turn = coverTurn
+        web.takeSnapshot(with: nil) { [weak self, weak web] image, _ in
+            guard let self, let web, turn == self.coverTurn, self.overlay != nil, web === self.activeWebView, self.pageShown,
+                  let picture = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+            let view = PlaceholderView(frame: web.frame)
+            view.wantsLayer = true
+            view.layer?.contents = picture
+            view.layer?.contentsGravity = .resize
+            // The page steps back while something is in front of it.
+            let dim = CALayer()
+            dim.backgroundColor = NSColor(white: 0, alpha: 0.38).cgColor
+            dim.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+            dim.frame = view.bounds
+            view.layer?.addSublayer(dim)
+            self.container.addSubview(view, positioned: .above, relativeTo: web)
+            self.cover = view
+            self.applyViewport()
+        }
+    }
+
+    private func layoutCover() {
+        guard let cover, let overlay, let web = activeWebView else { return }
+        if cover.frame != web.frame { cover.frame = web.frame }
+        let hole = host.frame(for: overlay).offsetBy(dx: -cover.frame.minX, dy: -cover.frame.minY)
+        let path = CGMutablePath()
+        path.addRect(cover.bounds)
+        path.addRect(hole)
+        let mask = CAShapeLayer()
+        mask.frame = cover.bounds
+        mask.fillRule = .evenOdd
+        mask.path = path
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        cover.layer?.mask = mask
+        CATransaction.commit()
+    }
+
+    private func removeCover() {
+        coverTurn += 1
+        cover?.removeFromSuperview()
+        cover = nil
+    }
+
+    private func layoutIcons() {
+        guard iconStrip != nil else { return }
+        let icons = iconCells.compactMap { cells, address in
+            favicons.image(for: address).map { (host.frame(for: cells), $0) }
+        }
+        iconStrip.show(icons, scale: window.backingScaleFactor)
     }
 
     private func activate(_ id: TabID) {
@@ -466,16 +561,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         if activeID != id {
             let previous = activeID.flatMap { store.tab($0) }
             removePlaceholder()
+            removeCover()
             activeID = id
             tab.turn += 1
             tab.webView.isHidden = !pageShown
             if let viewport { tab.webView.frame = host.frame(for: viewport) }
             // Above the page being left, which stays in the window until its picture is taken.
-            container.addSubview(tab.webView, positioned: .above, relativeTo: previous?.webView ?? host.view)
+            container.addSubview(tab.webView, positioned: .above, relativeTo: previous?.webView ?? iconStrip)
             if let previous { park(previous) }
             welcomeBack(tab)
         }
         applyViewport()
+        refreshCover()
         applyResponder()
         updateTitle()
     }
@@ -516,18 +613,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         let turn = tab.turn
         let web = tab.webView
         var cover = "no picture"
-        if let snapshot = tab.snapshot {
-            if abs(snapshot.size.width - web.frame.width) > 1 || abs(snapshot.size.height - web.frame.height) > 1 {
-                cover = "picture of another size"
-            } else if let image = Self.image(from: snapshot.jpeg) {
-                let view = PlaceholderView(frame: web.frame)
-                view.wantsLayer = true
-                view.layer?.contents = image
-                view.layer?.contentsGravity = .resize
-                container.addSubview(view, positioned: .above, relativeTo: web)
-                placeholder = view
-                cover = "picture ready in \(Self.milliseconds(since: started)) ms"
-            }
+        if let snapshot = tab.snapshot, let image = Self.image(from: snapshot.jpeg) {
+            let sameSize = abs(snapshot.size.width - web.frame.width) <= 1 && abs(snapshot.size.height - web.frame.height) <= 1
+            let view = PlaceholderView(frame: web.frame)
+            view.wantsLayer = true
+            view.layer?.contents = image
+            // A picture taken at another size is not stretched: pages are
+            // laid out from their top left corner, so it is pinned there at
+            // its own scale, which is where most of the page still is.
+            view.layer?.contentsGravity = sameSize ? .resize : .topLeft
+            view.layer?.contentsScale = CGFloat(image.width) / max(snapshot.size.width, 1)
+            view.layer?.masksToBounds = true
+            view.layer?.backgroundColor = window.backgroundColor.cgColor
+            container.addSubview(view, positioned: .above, relativeTo: web)
+            placeholder = view
+            cover = "picture\(sameSize ? "" : " of another size") ready in \(Self.milliseconds(since: started)) ms"
         }
         var done = false
         let finish: (String) -> Void = { [weak self, weak tab] outcome in
@@ -670,7 +770,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
     /// The steps Cmd+Plus and Cmd+Minus move through, as in Safari.
     private static let zoomSteps: [CGFloat] = [0.5, 0.67, 0.75, 0.85, 1, 1.15, 1.25, 1.5, 1.75, 2, 2.5, 3]
 
-    /// Zoom is per tab and lasts as long as the tab's web view.
+    /// Zoom is remembered for the site (see `ZoomStore`).
     private func stepZoom(_ direction: Int) {
         guard let web = activeWebView else { return NSSound.beep() }
         let current = web.pageZoom
@@ -679,6 +779,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             : Self.zoomSteps.last { $0 < current - 0.001 }
         guard let next else { return NSSound.beep() }
         web.pageZoom = next
+        zoomLevels.set(next, for: web.url)
     }
 
     @objc func zoomIn(_ sender: Any?) { stepZoom(1) }
@@ -690,6 +791,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         guard let web = activeWebView else { return NSSound.beep() }
         web.pageZoom = 1
         web.magnification = 1
+        zoomLevels.set(1, for: web.url)
     }
 
     private func emit(_ event: String, _ fields: [String: Any] = [:]) {
@@ -788,7 +890,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             } else if let input = req.string("input") {
                 url = InputResolver.resolve(input)
             }
-            let tab = store.create(url: url, profile: req.string("profile"))
+            let tab = store.create(url: url, profile: req.string("profile"), state: req.string("state"))
             if req.bool("activate") == true { activate(tab.id) }
             return Wire.reply(id: id, ["tab_id": tab.id])
 
@@ -803,6 +905,103 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
                     updateTitle()
                 }
                 return Wire.reply(id: id)
+            }
+
+        case "tab.discard":
+            // Puts a tab to sleep: its state is kept (closing does that) and
+            // its page is let go. The TUI keeps the tab and wakes it with
+            // `tab.create` and the state's name.
+            return withTab { tab in
+                Log.write("discard: tab \(tab.id) \(tab.webView.url?.host ?? "-")")
+                // The tab the app last showed can be asleep too, while the
+                // TUI shows something that is not a page in its place.
+                let wasActive = tab.id == activeID
+                store.close(tab.id)
+                if wasActive {
+                    activeID = nil
+                    removePlaceholder()
+                    removeCover()
+                    window.makeFirstResponder(host.view)
+                    updateTitle()
+                }
+                return Wire.reply(id: id)
+            }
+
+        case "tab.mute":
+            return withTab { tab in
+                let muted = req.bool("muted") ?? !tab.muted
+                guard PageAudio.mute(tab.webView, muted) else { return Wire.failure(id: id, "This version of macOS cannot mute a page.") }
+                tab.muted = muted
+                emit("tab.updated", tab.state)
+                return Wire.reply(id: id, ["muted": muted])
+            }
+
+        case "state.keep":
+            // Every state the TUI still has a tab for; the rest are let go.
+            let named = (req.params["tokens"] as? [String]) ?? []
+            states.keep(only: Set(named).union(store.orderedTabs.map(\.token)))
+            return Wire.reply(id: id)
+
+        case "page.scroll":
+            return withTab { tab in
+                PageKeys.scroll(tab.webView, how: req.string("how") ?? "")
+                return Wire.reply(id: id)
+            }
+
+        case "hints.start":
+            return withTab { tab in
+                PageKeys.startHints(tab.webView) { count in conn.send(Wire.reply(id: id, ["count": count])) }
+                return nil
+            }
+
+        case "hints.type":
+            return withTab { tab in
+                PageKeys.typeHint(tab.webView, typed: req.string("typed") ?? "", newTab: req.bool("new_tab") ?? false) { answer in
+                    conn.send(Wire.reply(id: id, (Wire.jsonSafe(answer) as? [String: Any]) ?? [:]))
+                }
+                return nil
+            }
+
+        case "hints.stop":
+            return withTab { tab in
+                PageKeys.stopHints(tab.webView)
+                return Wire.reply(id: id)
+            }
+
+        case "overlay.set":
+            guard let col = req.int("col"), let row = req.int("row"), let cols = req.int("cols"), let rows = req.int("rows"),
+                  col >= 0, row >= 0, cols > 0, rows > 0 else {
+                return Wire.failure(id: id, "overlay.set needs col, row, cols, rows")
+            }
+            overlay = CellRect(col: col, row: row, cols: cols, rows: rows)
+            refreshCover()
+            return Wire.reply(id: id)
+
+        case "overlay.clear":
+            overlay = nil
+            removeCover()
+            applyViewport()
+            applyResponder()
+            return Wire.reply(id: id)
+
+        case "icons.set":
+            // Which cells of the sidebar show the icon of which address.
+            let list = (req.params["icons"] as? [[String: Any]]) ?? []
+            iconCells = list.compactMap { item in
+                guard let col = (item["col"] as? NSNumber)?.intValue, let row = (item["row"] as? NSNumber)?.intValue,
+                      let url = item["url"] as? String, col >= 0, row >= 0 else { return nil }
+                return (CellRect(col: col, row: row, cols: 2, rows: 1), url)
+            }
+            layoutIcons()
+            return Wire.reply(id: id)
+
+        case "blocking.toggle":
+            return withTab { tab in
+                let web = tab.webView
+                guard let result = blocker.toggle(for: web.url, done: { [weak web] in web?.reload() }) else {
+                    return Wire.failure(id: id, "Content blocking is off, or this page has no site.")
+                }
+                return Wire.reply(id: id, ["site": result.site, "active": result.active])
             }
 
         case "tab.activate":
@@ -964,6 +1163,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
                 "scale": window.backingScaleFactor,
                 "downloads": downloads.records.map(\.wire),
                 "first_responder": window.firstResponder.map { String(describing: Swift.type(of: $0)) } ?? "",
+                "covered": cover != nil,
+                "overlay": overlay != nil,
+                "icon_cells": iconCells.count,
+                "icons_shown": iconStrip.layer?.sublayers?.count ?? 0,
+                "user_agent": UserAgent.application,
+                "sheet": window.attachedSheet != nil,
             ]
             if let activeID { fields["active"] = activeID }
             if let viewport {
@@ -1056,6 +1261,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
                     conn.send(Wire.reply(id: id, ["result": result.map { "\($0)" } ?? ""]))
                 }
             }
+
+        case "debug.sheet":
+            // Answers the sheet that is up, as its first button or its second would.
+            guard let sheet = window.attachedSheet else {
+                conn.send(Wire.failure(id: id, "no sheet"))
+                return
+            }
+            window.endSheet(sheet, returnCode: req.bool("accept") == false ? .alertSecondButtonReturn : .alertFirstButtonReturn)
+            conn.send(Wire.reply(id: id))
 
         case "debug.resize":
             let cell = host.cellSize
