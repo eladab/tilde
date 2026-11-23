@@ -47,6 +47,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("next-space", "Next space", "⌥⌘→"),
     ("prev-space", "Previous space", "⌥⌘←"),
     ("help", "Keyboard shortcuts", "⌘/"),
+    ("welcome", "Welcome: a short tour of Tilde", "⇧⌘/"),
     ("quit", "Quit Tilde", "⌘Q"),
 ];
 

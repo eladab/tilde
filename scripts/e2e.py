@@ -108,7 +108,9 @@ def launch():
     if os.path.exists(DEBUG_SOCK):
         os.remove(DEBUG_SOCK)
     command = ["open", "-n", APP, "--env", f"TILDE_DEBUG_SOCKET={DEBUG_SOCK}", "--env", f"TILDE_SESSION={SESSION}",
-               "--env", f"TILDE_DOWNLOADS={DOWNLOADS}"]
+               "--env", f"TILDE_DOWNLOADS={DOWNLOADS}",
+               # A first launch shows the welcome; the checks begin at a page.
+               "--env", "TILDE_HOME=https://webkit.org"]
     if BACKGROUND:
         command[1:1] = ["-g"]
         command += ["--env", "TILDE_BACKGROUND=1"]
@@ -456,6 +458,15 @@ def reach_checks(d):
     if wait(d, lambda s: len(s["tabs"]) == count and s.get("active"), "the tab behind closed")["active"] != reach_tab:
         typ(d, "k")
     wait(d, lambda s: s["active"] == reach_tab, "back on the reach tab")
+
+    # The welcome can be asked for, and gives the page back.
+    key(d, "?", "cmd+shift", 44)
+    wait_screen(d, lambda t: "Welcome to Tilde" in t and "1 of 5" in t, "the welcome")
+    typ(d, "l")
+    text = wait_screen(d, lambda t: "2 of 5" in t, "its second page")
+    check("Cmd+Shift+/ shows the welcome, and its pages turn", state(d)["web_hidden"] is True and "Going somewhere" in text)
+    typ(d, "\x1b")
+    wait(d, lambda s: s["web_hidden"] is False, "the page after the welcome")
 
     # The palette is drawn over a still of the page.
     key(d, "P", "cmd+shift", 35)

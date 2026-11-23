@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 pub const LOAD_DELAY: Duration = Duration::from_millis(300);
 
 pub const SIDEBAR_WIDTH: u16 = 28;
+/// Where the tests begin (see `App::first_page`).
+#[cfg(test)]
 pub const HOME_URL: &str = "https://webkit.org";
 
 #[derive(Debug, Clone, Default)]
@@ -527,6 +529,12 @@ pub struct App {
     pub(crate) orphans: HashSet<u64>,
     /// Entry that should take page focus once its tab exists.
     pub(crate) focus_on_create: Option<u64>,
+    /// The welcome is shown in place of the page: the page of it that is showing.
+    pub welcome: Option<usize>,
+    /// Mode to go back to when the welcome closes.
+    pub(crate) welcome_return: Option<Mode>,
+    /// The page a first launch opens, in place of the welcome. For tests.
+    pub first_page: Option<String>,
     /// The command palette, while it is open.
     pub palette: Option<crate::palette::CommandPalette>,
     /// Labels are on the page, waiting for one to be typed.
@@ -593,6 +601,9 @@ impl App {
             viewport_sent: None,
             orphans: HashSet::new(),
             focus_on_create: None,
+            welcome: None,
+            welcome_return: None,
+            first_page: None,
             palette: None,
             hints: None,
             closed: Vec::new(),
@@ -1031,6 +1042,9 @@ impl App {
             "history" => return self.toggle_view(View::History),
             _ => {}
         }
+        if name == "welcome" && self.welcome.is_some() {
+            return self.close_welcome();
+        }
         if self.overlay_open() && name != "help" && name != "quit" {
             // Any other command dismisses whatever is covering the page first.
             self.help_return = None;
@@ -1044,6 +1058,7 @@ impl App {
             "toggle-mute" => self.toggle_mute(),
             "toggle-blocking" => self.toggle_blocking(),
             "sleep-others" => self.sleep_other_tabs(),
+            "welcome" => self.open_welcome(),
             "find-next" => self.find_step(false),
             "find-prev" => self.find_step(true),
             "toggle-mode" => {
@@ -1276,9 +1291,9 @@ impl App {
             let back = edit.return_to.and_then(|key| self.index_of_key(key));
             self.selected = back.unwrap_or(self.selected.saturating_sub(1)).min(self.tabs.len().saturating_sub(1));
             if self.tabs.is_empty() {
-                // Never leave the browser with nothing: reopen the home page.
+                // Never leave the browser with nothing: an empty tab stays.
                 let key = self.new_key();
-                self.tabs.push(TabEntry { key, url: HOME_URL.to_string(), ..Default::default() });
+                self.tabs.push(TabEntry { key, ..Default::default() });
                 self.selected = 0;
             }
             self.session_dirty = true;
@@ -1442,8 +1457,9 @@ impl App {
         self.confirm_delete = false;
         // Over a view, the key reference returns to where the view came from.
         self.view = None;
+        self.welcome = None;
         self.confirm_clear = false;
-        self.help_return = self.view_return.take().or(Some(self.mode).filter(|m| *m == Mode::Page));
+        self.help_return = self.view_return.take().or(self.welcome_return.take()).or(Some(self.mode).filter(|m| *m == Mode::Page));
         self.help = true;
         self.message = None;
         self.request(Request::FocusSet { mode: Mode::Nav });
@@ -1546,6 +1562,8 @@ impl App {
             self.close_help();
         } else if self.palette.is_some() {
             self.handle_palette_key(key);
+        } else if self.welcome.is_some() {
+            self.handle_welcome_key(key);
         } else if self.view.is_some() {
             self.handle_view_key(key);
         } else if self.form.is_some() {
@@ -1606,6 +1624,7 @@ impl App {
             KeyCode::Char('P') => self.pin_home(),
             KeyCode::Char('n') => self.start_rename(),
             KeyCode::Char('?') => self.open_help(),
+            KeyCode::Char('W') => self.open_welcome(),
             KeyCode::Char('d') => self.open_view(View::Downloads),
             KeyCode::Char('y') => self.open_view(View::History),
             KeyCode::Char('I') => self.open_devtools(),
@@ -1683,6 +1702,8 @@ impl App {
         }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if self.help => self.close_help(),
+            // A click turns the page of the welcome.
+            MouseEventKind::Down(MouseButton::Left) if self.welcome.is_some() && contains(layout.viewport, col, row) => self.welcome_next(),
             // The status line's download notice leads to the downloads.
             MouseEventKind::Down(MouseButton::Left) if contains(layout.status, col, row) && self.download_notice().is_some() && self.view != Some(View::Downloads) => {
                 self.open_view(View::Downloads)

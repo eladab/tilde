@@ -3,7 +3,7 @@
 //! theirs in `Space::tabs` until they become current again. Tabs of every space
 //! stay loaded in the app.
 
-use crate::app::{App, TabEntry, HOME_URL};
+use crate::app::{App, TabEntry};
 use crate::art::{ART, BACKGROUNDS};
 use crate::protocol::{Mode, Request, TabState};
 use crate::session::{self, Session, SessionSpace, SessionTab};
@@ -161,7 +161,7 @@ impl App {
 
     /// Something other than the page is drawn in the page area.
     pub fn overlay_open(&self) -> bool {
-        self.help || self.form.is_some() || self.confirm_delete || self.view.is_some()
+        self.help || self.form.is_some() || self.confirm_delete || self.view.is_some() || self.welcome.is_some()
     }
 
     pub(crate) fn close_overlays(&mut self) {
@@ -171,7 +171,11 @@ impl App {
         }
         self.form = None;
         self.confirm_delete = false;
-        if self.view.is_some() {
+        if self.welcome.is_some() {
+            self.welcome_return = None;
+            self.welcome = None;
+            self.ensure_active();
+        } else if self.view.is_some() {
             self.close_view();
         } else if self.help {
             self.close_help();
@@ -457,7 +461,10 @@ impl App {
 
     /// Builds spaces and tabs from the session file and whatever the app still has loaded.
     pub(crate) fn restore(&mut self, live: Vec<TabState>, live_active: Option<u64>) {
-        let saved = self.session_path.as_deref().and_then(session::load).unwrap_or_default();
+        let saved = self.session_path.as_deref().and_then(session::load);
+        // With no session to restore, this is the first launch.
+        let first_launch = saved.is_none();
+        let saved = saved.unwrap_or_default();
         let same_instance = saved.instance.is_some() && saved.instance == self.instance;
         let mut unclaimed: Vec<TabState> = live;
         self.sidebar_visible = !saved.sidebar_hidden;
@@ -530,9 +537,14 @@ impl App {
             entry.apply(&state);
             self.tabs.push(entry);
         }
+        let mut welcome = false;
         if self.tabs.is_empty() {
+            // Nothing to restore: an empty tab, and on the first launch the
+            // welcome in front of it.
             let key = self.new_key();
-            self.tabs.push(TabEntry { key, url: HOME_URL.to_string(), ..Default::default() });
+            let url = self.first_page.clone().unwrap_or_default();
+            welcome = first_launch && url.is_empty();
+            self.tabs.push(TabEntry { key, url, ..Default::default() });
         }
         self.selected = self.selected.min(self.tabs.len() - 1);
 
@@ -545,6 +557,9 @@ impl App {
         self.session_dirty = true;
         self.keep_states();
         self.ensure_active();
+        if welcome {
+            self.open_welcome();
+        }
     }
 }
 

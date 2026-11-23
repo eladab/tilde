@@ -155,6 +155,7 @@ enum MainMenu {
 
         let help = submenu("Help")
         command(help, "Keyboard Shortcuts", "help", key: "/")
+        command(help, "Welcome to Tilde", "welcome", key: "?")
 
         return main
     }

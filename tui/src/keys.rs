@@ -28,6 +28,7 @@ pub const NAV: &[(&str, &str)] = &[
     ("d", "Downloads"),
     ("I", "Dev tools: network and storage"),
     ("?", "This key reference"),
+    ("W", "The welcome: a short tour"),
     ("q", "Quit"),
 ];
 

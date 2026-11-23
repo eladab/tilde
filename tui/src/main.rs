@@ -19,6 +19,7 @@ mod session;
 mod transport;
 mod ui;
 mod views;
+mod welcome;
 
 use app::App;
 use ratatui::backend::CrosstermBackend;
@@ -175,6 +176,8 @@ fn run(
     });
 
     let mut app = App::new(transport, session_path);
+    // The end-to-end tests begin at a page of their choosing, not at the welcome.
+    app.first_page = std::env::var("TILDE_HOME").ok().filter(|url| !url.is_empty());
     log("started");
     app.start();
 

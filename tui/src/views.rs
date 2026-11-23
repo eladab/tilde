@@ -35,8 +35,9 @@ impl App {
         self.form = None;
         self.confirm_delete = false;
         self.help = false;
-        // Coming from another view or the key reference, keep where that came from.
-        let came_from = self.view_return.take().or(self.help_return.take());
+        self.welcome = None;
+        // Coming from another view, the key reference or the welcome, keep where that came from.
+        let came_from = self.view_return.take().or(self.help_return.take()).or(self.welcome_return.take());
         self.view_return = came_from.or(Some(self.mode).filter(|m| *m == Mode::Page));
         self.view = Some(view);
         self.history_filter.clear();

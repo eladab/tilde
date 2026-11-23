@@ -16,6 +16,7 @@ type Engine = Rc<RefCell<MockEngine>>;
 fn start_sized(cols: u16, rows: u16) -> (App, Engine) {
     let engine = Rc::new(RefCell::new(MockEngine::new()));
     let mut app = App::new(Box::new(engine.clone()), None);
+    app.first_page = Some(crate::app::HOME_URL.to_string());
     app.now_override = Some(1_800_000_000);
     app.start();
     app.set_area(Rect::new(0, 0, cols, rows));

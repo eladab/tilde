@@ -260,7 +260,9 @@ Session: on every tab-set change, write
 `~/Library/Application Support/tilde/session.json` (ordered URLs, titles, active
 index) atomically. On launch, restore it: create only the active tab in the app
 and keep the rest as unloaded entries that are created on first activation.
-With no session, open one tab at `https://webkit.org`.
+With no session, open one empty tab and show the welcome (changed: it used to
+open `https://webkit.org`). `TILDE_HOME` names a page to open instead, for the
+end-to-end tests.
 
 Logs: app to `~/Library/Logs/tilde/app.log`, TUI to `~/Library/Logs/tilde/tui.log`.
 Neither writes diagnostics into the terminal view.

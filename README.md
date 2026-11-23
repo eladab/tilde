@@ -179,6 +179,7 @@ In NAV mode:
 | `d` | Downloads |
 | `I` | Dev tools: network and storage |
 | `?` | Key reference |
+| `W` | The welcome: a short tour |
 | `q` | Quit |
 
 In both modes: `Cmd+.` switches mode, `Cmd+L` edits the URL (and `Cmd+C` then copies it), `Cmd+T` and
@@ -187,7 +188,7 @@ forward, `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle tabs, `Cmd+1`…`Cmd+9` select on
 `Cmd+B` toggles the sidebar, `Cmd+Plus` and `Cmd+Minus` make the page larger
 and smaller (`Cmd+0` restores its actual size, and pinching on the trackpad
 zooms too), `Cmd+D` pins or unpins, `Cmd+Shift+H` returns to
-the pinned page, `Cmd+Y` shows the history, `Opt+Cmd+L` the downloads, `Opt+Cmd+I` the dev tools, `Cmd+/` the key reference, `Opt+Cmd+←` and `Opt+Cmd+→`
+the pinned page, `Cmd+Y` shows the history, `Opt+Cmd+L` the downloads, `Opt+Cmd+I` the dev tools, `Cmd+/` the key reference, `Cmd+Shift+/` the welcome, `Opt+Cmd+←` and `Opt+Cmd+→`
 switch space, `Ctrl+1`…`Ctrl+9` select one, `Cmd+Shift+N` makes a new one.
 `Cmd+Shift+P` opens the command palette, `Cmd+J` labels the page's links
 (`Cmd+Shift+J` to open one in a new tab), `Cmd+Shift+T` reopens the tab closed
@@ -196,6 +197,18 @@ last, `Opt+Cmd+M` mutes or unmutes the tab.
 in the system picker, then its username or password.
 Cmd-click opens a link in a background tab. Rename is in the Tabs menu; editing
 and deleting spaces are in the Spaces menu.
+
+### Welcome
+
+The first launch opens no web page. It shows a welcome of five short pages:
+the two modes, going somewhere, using a page without the mouse, finding
+things, and keeping order. `→` and `←` (or `l` / `h`, `Space`, a click) turn
+the pages, `1`…`5` go to one, `Esc` closes it; past the last page it closes
+by itself and leaves the address field open. `W` in NAV mode, `Cmd+Shift+/`
+anywhere, or Help → Welcome to Tilde shows it again.
+
+A browser with nothing open has one empty tab, not a page of somebody's
+choosing.
 
 ### The page from the keyboard
 

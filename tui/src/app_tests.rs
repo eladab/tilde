@@ -15,6 +15,7 @@ type Engine = Rc<RefCell<MockEngine>>;
 
 fn start_with(engine: Engine, session: Option<PathBuf>) -> App {
     let mut app = App::new(Box::new(engine), session);
+    app.first_page = Some(HOME_URL.to_string());
     app.start();
     app.set_area(Rect::new(0, 0, 120, 40));
     app
@@ -217,8 +218,14 @@ fn closing_the_last_tab_leaves_a_new_one() {
     assert!(app.edit.is_some());
     assert!(engine.borrow().tab_ids().is_empty());
     press(&mut app, KeyCode::Esc);
-    assert_eq!(urls(&app), vec![HOME_URL], "an empty browser reopens the home page");
-    assert!(app.tabs[0].tab_id.is_some());
+    assert_eq!(urls(&app), vec![""], "an empty browser keeps one empty tab");
+    assert!(app.edit.is_none() && app.tabs[0].tab_id.is_none());
+    assert!(render(&mut app, 100, 20).contains("Type a URL or search terms"));
+    // It is a tab like any other: o gives it an address.
+    key(&mut app, 'o');
+    type_text(&mut app, "a.example");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(urls(&app), vec!["https://a.example"]);
 }
 
 #[test]
@@ -431,6 +438,7 @@ fn closing_a_tab_before_it_finishes_opening_does_not_leak_it() {
     let engine = Rc::new(RefCell::new(MockEngine::new()));
     let held = Rc::new(RefCell::new(Vec::new()));
     let mut app = App::new(Box::new(Deferred(engine.clone(), held.clone())), None);
+    app.first_page = Some(HOME_URL.to_string());
     app.start();
     app.set_area(Rect::new(0, 0, 120, 40));
     assert!(app.tabs[0].pending);
@@ -1150,6 +1158,7 @@ fn switching_space_while_a_tab_is_still_opening_does_not_lose_it() {
     let held = Rc::new(RefCell::new(Vec::new()));
     let hold = Rc::new(RefCell::new(false));
     let mut app = App::new(Box::new(Deferred(engine.clone(), held.clone(), hold.clone())), None);
+    app.first_page = Some(HOME_URL.to_string());
     app.start();
     app.set_area(Rect::new(0, 0, 120, 40));
     let home_tab = app.tabs[0].tab_id.unwrap();
@@ -2198,4 +2207,100 @@ fn the_history_view_is_filtered_by_typing() {
     assert!(app.history_filter.is_empty() && app.view.is_some());
     press(&mut app, KeyCode::Esc);
     assert!(app.view.is_none());
+}
+
+// ----- the welcome -----
+
+fn first_launch() -> (App, Engine) {
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let mut app = App::new(Box::new(engine.clone()), None);
+    app.start();
+    app.set_area(Rect::new(0, 0, 120, 40));
+    (app, engine)
+}
+
+#[test]
+fn the_first_launch_shows_the_welcome_and_no_page() {
+    let (mut app, engine) = first_launch();
+    assert_eq!(app.welcome, Some(0));
+    assert!(engine.borrow().tab_ids().is_empty(), "no page is opened behind it");
+    let screen = render(&mut app, 120, 40);
+    assert!(screen.contains("Welcome to Tilde") && screen.contains("1 of 5"), "{screen}");
+
+    // The pages turn forward and back, and stop at the first.
+    press(&mut app, KeyCode::Right);
+    assert!(render(&mut app, 120, 40).contains("Going somewhere"));
+    key(&mut app, 'l');
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.welcome, Some(0));
+    key(&mut app, '4');
+    assert!(render(&mut app, 120, 40).contains("Finding anything"));
+    assert!(!app.should_quit && app.tabs.len() == 1, "the keys turn pages; they are not commands");
+
+    // Past the last page it closes, and the address field is waiting.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.welcome, Some(4));
+    press(&mut app, KeyCode::Enter);
+    assert!(app.welcome.is_none());
+    assert!(app.edit.is_some(), "with nothing open, the next thing is an address");
+    type_text(&mut app, "example.com");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(urls(&app), vec!["https://example.com"]);
+}
+
+#[test]
+fn the_welcome_is_not_shown_again_but_can_be_asked_for() {
+    let path = temp_session("welcome");
+    let _ = std::fs::remove_file(&path);
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let mut app = App::new(Box::new(engine.clone()), Some(path.clone()));
+    app.start();
+    app.set_area(Rect::new(0, 0, 120, 40));
+    assert!(app.welcome.is_some());
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    app.save_session();
+    drop(app);
+
+    // The second launch has a session, even one without a tab in it.
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let mut app = App::new(Box::new(engine.clone()), Some(path.clone()));
+    app.start();
+    app.set_area(Rect::new(0, 0, 120, 40));
+    assert!(app.welcome.is_none() && app.tabs.len() == 1);
+
+    // W brings it back over a page, and closing it returns to the page.
+    open(&mut app, "a.example");
+    assert_eq!(app.mode, Mode::Page);
+    command(&mut app, "welcome");
+    assert_eq!((app.welcome, app.mode), (Some(0), Mode::Nav));
+    assert!(!engine.borrow().visible, "the welcome takes the place of the page");
+    command(&mut app, "welcome");
+    assert!(app.welcome.is_none() && engine.borrow().visible);
+    assert_eq!(app.mode, Mode::Page);
+    command(&mut app, "toggle-mode");
+    key(&mut app, 'W');
+    assert_eq!(app.welcome, Some(0));
+    // Another shortcut closes it and is carried out.
+    command(&mut app, "history");
+    assert!(app.welcome.is_none() && app.view.is_some());
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(crate::history::path_beside(&path));
+}
+
+#[test]
+fn every_page_of_the_welcome_fits_its_width() {
+    use unicode_width::UnicodeWidthStr;
+    for page in crate::welcome::PAGES {
+        let key_w = page.keys.iter().map(|(k, _, _)| k.width()).max().unwrap_or(0);
+        for row in page.intro.iter().chain(page.outro) {
+            assert!(row.width() <= 64, "{row}");
+        }
+        for (_, what, shortcut) in page.keys {
+            let gap = if shortcut.is_empty() { 0 } else { 2 };
+            assert!(key_w + 5 + what.width() + gap + shortcut.width() <= 64, "{what}");
+        }
+    }
 }

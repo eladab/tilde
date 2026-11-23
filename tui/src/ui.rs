@@ -558,6 +558,9 @@ fn draw_viewport(buf: &mut Buffer, app: &App) {
         draw_help(buf, view, &p);
         return;
     }
+    if let Some(page) = app.welcome {
+        return crate::welcome::draw(buf, view, page, &p);
+    }
     let lines: Vec<(String, Style)> = match app.current() {
         None => vec![("Connecting…".into(), Style::default().fg(p.dim).bg(p.bg))],
         Some(_) if !app.ready => vec![("Connecting…".into(), Style::default().fg(p.dim).bg(p.bg))],
@@ -1167,6 +1170,8 @@ fn draw_status(buf: &mut Buffer, app: &App) -> Option<Position> {
         "⌫ undo   esc cancel"
     } else if app.help {
         "any key closes"
+    } else if app.welcome.is_some() {
+        "← → pages   esc close"
     } else if app.form.is_some() || app.confirm_delete {
         ""
     } else if let Some(edit) = &app.edit {
