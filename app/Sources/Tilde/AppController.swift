@@ -44,6 +44,15 @@ final class BrowserWindow: NSWindow {
         super.sendEvent(event)
     }
 
+    /// A key the page did not consume (it acted on it in script without
+    /// saying so, or simply had no use for it) is handed back by WebKit and
+    /// climbs the responders to the window, which would sound the bell. A
+    /// page's leftover keys are nobody's mistake: they are dropped quietly.
+    override func keyDown(with event: NSEvent) {
+        if Self.isInsideWebView(firstResponder as? NSView) { return }
+        super.keyDown(with: event)
+    }
+
     /// Set while the app itself moves focus to the page.
     var allowPageFocus = false
 
