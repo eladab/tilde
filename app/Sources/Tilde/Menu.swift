@@ -66,12 +66,16 @@ enum MainMenu {
         standard(edit, "Undo", Selector(("undo:")), key: "z")
         standard(edit, "Redo", Selector(("redo:")), key: "z", mods: [.command, .shift])
         edit.addItem(.separator())
-        standard(edit, "Cut", #selector(NSText.cut(_:)), key: "x")
+        let cut = NSMenuItem(title: "Cut", action: #selector(AppController.cutRequested(_:)), keyEquivalent: "x")
+        cut.target = target
+        edit.addItem(cut)
         let copy = NSMenuItem(title: "Copy", action: #selector(AppController.copyRequested(_:)), keyEquivalent: "c")
         copy.target = target
         edit.addItem(copy)
         standard(edit, "Paste", #selector(NSText.paste(_:)), key: "v")
-        standard(edit, "Select All", #selector(NSText.selectAll(_:)), key: "a")
+        let selectAll = NSMenuItem(title: "Select All", action: #selector(AppController.selectAllRequested(_:)), keyEquivalent: "a")
+        selectAll.target = target
+        edit.addItem(selectAll)
         edit.addItem(.separator())
         let find = NSMenu(title: "Find")
         let findItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
@@ -122,6 +126,7 @@ enum MainMenu {
         let tabs = submenu("Tabs")
         command(tabs, "Next Tab", "next-tab", key: "\t", mods: .control)
         command(tabs, "Previous Tab", "prev-tab", key: "\t", mods: [.control, .shift])
+        command(tabs, "Tab Used Before", "recent-tab", key: "`", mods: .control)
         tabs.addItem(.separator())
         command(tabs, "Pin or Unpin Tab", "toggle-pin", key: "d")
         // An uppercase key equivalent is how AppKit spells Shift for letters.

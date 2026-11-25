@@ -66,6 +66,9 @@ pub struct TabEntry {
     pub state: Option<String>,
     /// Since when the tab has been out of sight; `None` while it is showing.
     pub left_at: Option<Instant>,
+    /// When the tab was last settled on, by the count of `App::use_clock`:
+    /// the larger, the more recently. Zero for a tab never shown.
+    pub used: u64,
 }
 
 impl TabEntry {
@@ -206,6 +209,8 @@ pub struct UrlEdit {
     pub cursor: usize,
     /// The text is a prefilled URL that the first typed character replaces.
     pub replace_on_type: bool,
+    /// Where a selection was started from; it reaches from here to the cursor.
+    pub anchor: Option<usize>,
     /// Entry to return to if a brand-new tab is cancelled.
     return_to: Option<u64>,
     /// How the history would finish the typed address, shown after it.
@@ -226,12 +231,59 @@ impl UrlEdit {
         Self { text: text.to_string(), cursor: text.chars().count(), ..Default::default() }
     }
 
-    pub(crate) fn insert(&mut self, s: &str) {
+    /// The selected characters, from and up to, if any are.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let len = self.len();
         if self.replace_on_type {
-            self.text.clear();
-            self.cursor = 0;
-            self.replace_on_type = false;
+            return (len > 0).then_some((0, len));
         }
+        let anchor = self.anchor?.min(len);
+        let cursor = self.cursor.min(len);
+        (anchor != cursor).then_some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let (from, to) = self.selection()?;
+        Some(self.text.chars().skip(from).take(to - from).collect())
+    }
+
+    pub(crate) fn select_all(&mut self) {
+        self.replace_on_type = false;
+        self.anchor = Some(0);
+        self.cursor = self.len();
+    }
+
+    /// Removes what is selected. Answers whether anything was.
+    fn delete_selection(&mut self) -> bool {
+        let selection = self.selection();
+        self.replace_on_type = false;
+        self.anchor = None;
+        match selection {
+            Some((from, to)) => {
+                self.delete_range(from, to);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Moves the cursor, stretching the selection after it or letting it go.
+    fn move_to(&mut self, target: usize, select: bool) {
+        if select {
+            if self.replace_on_type {
+                self.anchor = Some(0);
+            } else if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.replace_on_type = false;
+        self.cursor = target;
+    }
+
+    pub(crate) fn insert(&mut self, s: &str) {
+        self.delete_selection();
         let clean: String = s.chars().filter(|c| !c.is_control()).collect();
         let at = self.byte_index(self.cursor);
         self.text.insert_str(at, &clean);
@@ -256,11 +308,7 @@ impl UrlEdit {
     }
 
     fn backspace(&mut self) {
-        if self.replace_on_type {
-            self.text.clear();
-            self.cursor = 0;
-            self.replace_on_type = false;
-        } else if self.cursor > 0 {
+        if !self.delete_selection() && self.cursor > 0 {
             self.delete_range(self.cursor - 1, self.cursor);
         }
     }
@@ -299,61 +347,45 @@ impl UrlEdit {
     }
 
     fn delete_word(&mut self) {
-        self.replace_on_type = false;
-        self.delete_range(self.word_start(), self.cursor);
+        if !self.delete_selection() {
+            self.delete_range(self.word_start(), self.cursor);
+        }
     }
 
-    /// Applies an editing key: typing, deleting, moving the cursor.
+    /// Applies an editing key: typing, deleting, moving the cursor. With
+    /// Shift, moving selects, as it does in any text field on a Mac.
     pub(crate) fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // Option arrives as Alt. The terminal sends Option+← and Option+→ as
         // the Emacs pair Esc b and Esc f.
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let len = self.len();
+        // Without Shift, ← and → leave a selection at its near end.
+        let held = self.selection().filter(|_| !shift);
         match key.code {
-            KeyCode::Left | KeyCode::Char('b') if alt => {
-                self.cursor = self.word_start();
-                self.replace_on_type = false;
-            }
-            KeyCode::Right | KeyCode::Char('f') if alt => {
-                self.cursor = self.word_end();
-                self.replace_on_type = false;
-            }
+            KeyCode::Left | KeyCode::Char('b' | 'B') if alt => self.move_to(self.word_start(), shift),
+            KeyCode::Right | KeyCode::Char('f' | 'F') if alt => self.move_to(self.word_end(), shift),
             KeyCode::Backspace if alt => self.delete_word(),
             KeyCode::Char('u') if ctrl => {
                 self.text.clear();
                 self.cursor = 0;
+                self.anchor = None;
                 self.replace_on_type = false;
             }
             KeyCode::Char('w') if ctrl => self.delete_word(),
-            KeyCode::Char('a') if ctrl => {
-                self.cursor = 0;
-                self.replace_on_type = false;
-            }
-            KeyCode::Char('e') if ctrl => {
-                self.cursor = len;
-                self.replace_on_type = false;
-            }
-            KeyCode::Home => {
-                self.cursor = 0;
-                self.replace_on_type = false;
-            }
-            KeyCode::End => {
-                self.cursor = len;
-                self.replace_on_type = false;
-            }
-            KeyCode::Left => {
-                self.cursor = self.cursor.saturating_sub(1);
-                self.replace_on_type = false;
-            }
-            KeyCode::Right => {
-                self.cursor = (self.cursor + 1).min(len);
-                self.replace_on_type = false;
-            }
+            KeyCode::Char('a') if ctrl => self.move_to(0, false),
+            KeyCode::Char('e') if ctrl => self.move_to(len, false),
+            KeyCode::Home => self.move_to(0, shift),
+            KeyCode::End => self.move_to(len, shift),
+            // A field is one line: up and down are its two ends.
+            KeyCode::Up if shift => self.move_to(0, true),
+            KeyCode::Down if shift => self.move_to(len, true),
+            KeyCode::Left => self.move_to(held.map(|(from, _)| from).unwrap_or(self.cursor.saturating_sub(1)), shift),
+            KeyCode::Right => self.move_to(held.map(|(_, to)| to).unwrap_or((self.cursor + 1).min(len)), shift),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => {
-                self.replace_on_type = false;
-                if self.cursor < len {
+                if !self.delete_selection() && self.cursor < len {
                     let at = self.cursor;
                     self.delete_range(at, at + 1);
                 }
@@ -547,6 +579,8 @@ pub struct App {
     pub history_typing: bool,
     /// After how long a tab out of sight is put to sleep; `None` is never.
     pub discard_after: Option<Duration>,
+    /// Counts the tabs settled on, to tell which was used last (`TabEntry::used`).
+    use_clock: u64,
     pub(crate) last_discard_check: Option<Instant>,
     /// The cells the app has been told are drawn over the page.
     pub(crate) overlay_sent: Option<Rect>,
@@ -583,6 +617,7 @@ impl App {
             downloads: Vec::new(),
             downloads_unseen: false,
             discard_after: crate::reach::discard_after(session_path.as_deref()),
+            use_clock: 0,
             history: session_path.as_deref().map(|p| History::load(&crate::history::path_beside(p))).unwrap_or_default(),
             now_override: None,
             frame: 0,
@@ -649,6 +684,34 @@ impl App {
             if self.inbox.is_empty() {
                 break;
             }
+        }
+        self.note_shown();
+    }
+
+    /// Marks the tab that is showing as the one used last. A tab that is
+    /// only being stepped over on the way to another does not count.
+    fn note_shown(&mut self) {
+        let clock = self.use_clock;
+        let passing = self.load_due;
+        let Some(entry) = self.tabs.get_mut(self.selected) else { return };
+        if entry.used == clock && clock > 0 || passing.is_some_and(|(key, _)| key == entry.key) {
+            return;
+        }
+        self.use_clock += 1;
+        entry.used = self.use_clock;
+    }
+
+    /// The tab that was in use before the one showing, if any was.
+    fn recent_other(&self) -> Option<usize> {
+        let others = self.tabs.iter().enumerate().filter(|(index, entry)| *index != self.selected && entry.used > 0);
+        others.max_by_key(|(_, entry)| entry.used).map(|(index, _)| index)
+    }
+
+    /// Goes to the tab used before this one; again, and it comes back.
+    pub fn recent_tab(&mut self) {
+        match self.recent_other() {
+            Some(index) => self.select(index),
+            None => self.message = Some("There is no earlier tab to go back to.".into()),
         }
     }
 
@@ -993,31 +1056,50 @@ impl App {
     pub(crate) fn on_command(&mut self, name: &str, arg: Option<i64>, text: Option<String>) {
         if name == "copy" {
             // The terminal has no selection of its own to copy: the text
-            // field is drawn by us, so Cmd+C copies what is in it.
-            let field = self
-                .palette
-                .as_ref()
-                .map(|p| &p.edit)
-                .or(self.edit.as_ref())
-                .or(self.find.as_ref().filter(|_| self.find_has_keys()).map(|f| &f.edit));
-            if let Some(text) = field.map(|e| e.text.clone()).filter(|t| !t.is_empty()) {
+            // field is drawn by us, so Cmd+C copies what is selected in it,
+            // or all of it.
+            let text = self.typed_field().map(|e| e.selected_text().unwrap_or_else(|| e.text.clone())).filter(|t| !t.is_empty());
+            if let Some(text) = text {
                 self.request(Request::ClipboardSet { text });
             } else if self.dev_has_keys() {
                 self.dev_copy();
             }
             return;
         }
-        if name == "clear-line" {
-            // Cmd+Delete, which the terminal has no encoding for: it clears
-            // the text field being typed in, as Ctrl+U does.
-            let typing = self.form.is_some()
-                || self.edit.is_some()
-                || self.palette.is_some()
-                || self.history_typing
-                || self.find_has_keys()
-                || (self.dev.search.is_some() && self.dev_has_keys());
+        if name == "cut" {
+            if let Some(text) = self.typed_field().and_then(|e| e.selected_text()) {
+                self.request(Request::ClipboardSet { text });
+                // Deleting goes the way of the key, so what hangs on the
+                // text (the palette's list, the search) follows it.
+                if let Some(edit) = self.edit.as_mut() {
+                    edit.completion = None;
+                }
+                self.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+            }
+            return;
+        }
+        if name == "select-all" {
+            if let Some(edit) = self.typed_field_mut() {
+                edit.select_all();
+                edit.completion = None;
+            }
+            return;
+        }
+        // Keys the terminal has no encoding for, sent as commands: Cmd+Delete
+        // clears the field as Ctrl+U does, Cmd+← and Cmd+→ go to its ends,
+        // and with Shift select up to them.
+        let stands_for = match name {
+            "clear-line" => Some(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            "line-start" => Some(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            "line-end" => Some(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            "select-line-start" => Some(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT)),
+            "select-line-end" => Some(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT)),
+            _ => None,
+        };
+        if let Some(key) = stands_for {
+            let typing = self.form.is_some() || self.history_typing || self.typed_field().is_some();
             if typing && !self.help && (self.view.is_none() || self.history_typing) && !self.confirm_delete {
-                self.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                self.handle_key(key);
             }
             return;
         }
@@ -1111,6 +1193,7 @@ impl App {
             "reload" => self.reload(),
             "back" => self.back(),
             "forward" => self.forward(),
+            "recent-tab" => self.recent_tab(),
             "next-tab" => self.step(1, true),
             "prev-tab" => self.step(-1, true),
             "select-tab" => {
@@ -1266,7 +1349,7 @@ impl App {
         let cursor = text.chars().count();
         let replace_on_type = !text.is_empty();
         let return_to = self.edit.as_ref().and_then(|e| e.return_to);
-        self.edit = Some(UrlEdit { kind: EditKind::Url, text, cursor, replace_on_type, return_to, completion: None });
+        self.edit = Some(UrlEdit { kind: EditKind::Url, text, cursor, replace_on_type, return_to, completion: None, anchor: None });
         self.message = None;
     }
 
@@ -1279,7 +1362,7 @@ impl App {
         }
         let text = entry.label();
         let cursor = text.chars().count();
-        self.edit = Some(UrlEdit { kind: EditKind::Rename, text, cursor, replace_on_type: true, return_to: None, completion: None });
+        self.edit = Some(UrlEdit { kind: EditKind::Rename, text, cursor, replace_on_type: true, return_to: None, completion: None, anchor: None });
         self.message = None;
     }
 
@@ -1383,7 +1466,10 @@ impl App {
             return;
         }
         let pinned = self.pinned_count();
-        if pinned < self.tabs.len() {
+        if let Some(recent) = self.recent_other() {
+            self.selected = recent;
+            self.ensure_active();
+        } else if pinned < self.tabs.len() {
             self.selected = pinned;
             self.ensure_active();
         } else {
@@ -1478,9 +1564,14 @@ impl App {
     }
 
     pub(crate) fn remove_entry(&mut self, index: usize) {
+        // Closing the tab that is showing goes back to the one used before it.
+        let back = (index == self.selected).then(|| self.recent_other()).flatten().map(|at| self.tabs[at].key);
         self.tabs.remove(index);
         if index < self.selected {
             self.selected -= 1;
+        }
+        if let Some(at) = back.and_then(|key| self.index_of_key(key)) {
+            self.selected = at;
         }
         self.session_dirty = true;
         if self.tabs.is_empty() {
@@ -1607,6 +1698,7 @@ impl App {
             KeyCode::Char('>') => self.open_palette(">"),
             KeyCode::Char('/') => self.open_find(None),
             KeyCode::Char('u') => self.reopen_tab(),
+            KeyCode::Char('`') | KeyCode::Tab => self.recent_tab(),
             KeyCode::Char('m') => self.toggle_mute(),
             KeyCode::Char('j') | KeyCode::Down => self.step(1, false),
             KeyCode::Char('k') | KeyCode::Up => self.step(-1, false),
@@ -1638,6 +1730,39 @@ impl App {
         }
     }
 
+    /// The text field the keys are going to, of those that can hold a selection.
+    fn typed_field(&self) -> Option<&UrlEdit> {
+        if let Some(palette) = self.palette.as_ref() {
+            return Some(&palette.edit);
+        }
+        if self.help || self.confirm_delete || self.form.is_some() || self.view.is_some() {
+            return None;
+        }
+        if self.edit.is_some() {
+            self.edit.as_ref()
+        } else if self.find_has_keys() {
+            self.find.as_ref().map(|f| &f.edit)
+        } else if self.dev_has_keys() {
+            self.dev.search.as_ref()
+        } else {
+            None
+        }
+    }
+
+    fn typed_field_mut(&mut self) -> Option<&mut UrlEdit> {
+        self.typed_field()?;
+        let finding = self.find_has_keys();
+        if self.palette.is_some() {
+            self.palette.as_mut().map(|p| &mut p.edit)
+        } else if self.edit.is_some() {
+            self.edit.as_mut()
+        } else if finding {
+            self.find.as_mut().map(|f| &mut f.edit)
+        } else {
+            self.dev.search.as_mut()
+        }
+    }
+
     fn handle_edit_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -1651,7 +1776,7 @@ impl App {
         if let Some(completion) = edit.completion.take() {
             match key.code {
                 // Moving on past the end takes the completion as typed.
-                KeyCode::Right | KeyCode::End | KeyCode::Tab if !alt => return edit.accept(completion),
+                KeyCode::Right | KeyCode::End | KeyCode::Tab if !alt && !key.modifiers.contains(KeyModifiers::SHIFT) => return edit.accept(completion),
                 KeyCode::Char('e' | 'f') if ctrl => return edit.accept(completion),
                 // Deleting removes the completion first, and it stays away.
                 KeyCode::Backspace if !alt && !ctrl => return,

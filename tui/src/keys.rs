@@ -3,6 +3,7 @@
 
 pub const NAV: &[(&str, &str)] = &[
     ("j / k", "Next / previous tab"),
+    ("`  or Tab", "The tab used before this one; again to come back"),
     ("Enter, i", "Go to the page"),
     ("f / F", "Follow a link by its label / in a new tab"),
     ("Space, ^D / ^U", "Scroll the page down / by half a page"),
@@ -59,7 +60,9 @@ pub const ANYWHERE: &[(&str, &str)] = &[
     ("⌘C", "Copy the address while editing it"),
     ("→ / Tab", "Take the address offered while typing; ⌫ refuses it"),
     ("⌥← / ⌥→", "Move by words while typing"),
+    ("⌘← / ⌘→", "The start / the end of what is typed"),
     ("⌥⌫ / ⌘⌫", "Delete the word / the whole line while typing"),
+    ("⇧ with ← → ⌥ ⌘", "Select while moving; ⌘A all, ⌘C copy, ⌘X cut"),
     ("⌘F", "Find in the page; ⏎ / ↑ or ⌘G / ⇧⌘G step through the matches"),
     ("⌘E", "Find what is selected in the page"),
     ("⌘P", "Print the page, or save it as a PDF"),
@@ -71,6 +74,7 @@ pub const ANYWHERE: &[(&str, &str)] = &[
     ("⌘R", "Reload"),
     ("⌘[ / ⌘]", "Back / forward"),
     ("⌃Tab / ⌃⇧Tab", "Next / previous tab"),
+    ("⌃`", "The tab used before this one; again to come back"),
     ("⌘1 … ⌘9", "Select tab (9 is the last)"),
     ("⌘D", "Pin or unpin tab"),
     ("⌘⇧H", "Return to the pinned page"),

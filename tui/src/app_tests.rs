@@ -206,7 +206,8 @@ fn switching_reordering_and_closing() {
     key(&mut app, 'x');
     assert_eq!(urls(&app), vec!["https://a.example", "https://b.example"]);
     assert!(!engine.borrow().tab_ids().contains(&closing));
-    assert_eq!(engine.borrow().active, app.tabs[0].tab_id);
+    assert_eq!(app.selected, 1, "closing goes back to the tab last settled on, not to a neighbour");
+    assert_eq!(engine.borrow().active, app.tabs[1].tab_id);
     assert_eq!(engine.borrow().tab_ids().len(), 2);
 }
 
@@ -268,6 +269,7 @@ fn page_initiated_tabs() {
     let (mut app, engine) = start();
     open(&mut app, "a.example");
     app.select(0);
+    rest(&mut app);
     let opener = app.tabs[0].tab_id.unwrap();
 
     let popup = engine.borrow_mut().preload("https://popup.example");
@@ -284,7 +286,7 @@ fn page_initiated_tabs() {
 
     app.handle_line(&format!(r#"{{"event":"tab.closed","tab_id":{popup}}}"#));
     assert_eq!(urls(&app), vec![HOME_URL, "https://bg.example", "https://a.example"]);
-    assert_eq!(engine.borrow().active, Some(background));
+    assert_eq!(engine.borrow().active, Some(opener), "a closed tab gives way to the one used before it");
 }
 
 #[test]
@@ -635,12 +637,12 @@ fn closing_a_pinned_tab_unloads_it_but_keeps_the_pin() {
     assert_eq!(app.tabs[0].tab_id, None);
     assert_eq!(app.tabs[0].url, "https://b.example", "an unloaded pin is back at its pinned page");
     assert!(!engine.borrow().tab_ids().contains(&tab_id));
-    assert_eq!(app.selected, 1, "the selection moves to the first unpinned tab");
-    assert_eq!(engine.borrow().active, app.tabs[1].tab_id);
+    assert_eq!(app.selected, 2, "the selection moves to the tab used before");
+    assert_eq!(engine.borrow().active, app.tabs[2].tab_id);
     assert_eq!(engine.borrow().tab_ids().len(), 2, "the unloaded pin is not loaded again behind our back");
 
     // Selecting it loads it again, at the pinned page.
-    key(&mut app, 'k');
+    app.select(0);
     rest(&mut app);
     assert_eq!(app.selected, 0);
     let reloaded = app.tabs[0].tab_id.expect("loaded again");
@@ -652,7 +654,7 @@ fn closing_a_pinned_tab_unloads_it_but_keeps_the_pin() {
     assert_eq!(app.tabs[0].tab_id, None);
 
     // Unpinned, it closes for good.
-    key(&mut app, 'k');
+    app.select(0);
     key(&mut app, 'p');
     key(&mut app, 'x');
     assert_eq!(urls(&app), vec![HOME_URL, "https://a.example"]);
@@ -2303,4 +2305,123 @@ fn every_page_of_the_welcome_fits_its_width() {
             assert!(key_w + 5 + what.width() + gap + shortcut.width() <= 64, "{what}");
         }
     }
+}
+
+#[test]
+fn text_in_a_field_is_selected_with_shift() {
+    let (mut app, engine) = start();
+    let with = |app: &mut App, code, mods| app.handle_key(KeyEvent::new(code, mods));
+    let copied = |engine: &Engine| engine.borrow().log.iter().rev().find(|r| r["method"] == "clipboard.set").map(|r| r["text"].as_str().unwrap().to_string());
+    let shift = KeyModifiers::SHIFT;
+    key(&mut app, 't');
+    type_text(&mut app, "example.com/some/path");
+    app.edit.as_mut().unwrap().completion = None;
+
+    // By characters, from the end backwards.
+    for _ in 0..4 {
+        with(&mut app, KeyCode::Left, shift);
+    }
+    assert_eq!(app.edit.as_ref().unwrap().selected_text().as_deref(), Some("path"));
+    with(&mut app, KeyCode::Right, shift);
+    assert_eq!(app.edit.as_ref().unwrap().selected_text().as_deref(), Some("ath"), "the moving end is the cursor");
+    command(&mut app, "copy");
+    rest(&mut app);
+    assert_eq!(copied(&engine).as_deref(), Some("ath"));
+
+    // An arrow alone lets go of the selection at that end of it.
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.edit.as_ref().unwrap().selection(), None);
+    assert_eq!(app.edit.as_ref().unwrap().cursor, 18);
+
+    // By words, with Option as well.
+    press(&mut app, KeyCode::End);
+    // (A separator is a stop of its own, as it is when moving without Shift.)
+    for _ in 0..3 {
+        with(&mut app, KeyCode::Left, shift | KeyModifiers::ALT);
+    }
+    assert_eq!(app.edit.as_ref().unwrap().selected_text().as_deref(), Some("some/path"));
+
+    // Cut takes it out of the text and onto the clipboard.
+    command(&mut app, "cut");
+    rest(&mut app);
+    assert_eq!(copied(&engine).as_deref(), Some("some/path"));
+    assert_eq!(app.edit.as_ref().unwrap().text, "example.com/");
+    assert_eq!(app.edit.as_ref().unwrap().selection(), None);
+
+    // To the ends: Shift+Home, and Cmd+Shift+→ which arrives as a command.
+    with(&mut app, KeyCode::Home, shift);
+    assert_eq!(app.edit.as_ref().unwrap().selected_text().as_deref(), Some("example.com/"));
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.edit.as_ref().unwrap().cursor, 12);
+    press(&mut app, KeyCode::Home);
+    with(&mut app, KeyCode::Right, shift | KeyModifiers::ALT);
+    assert_eq!(app.edit.as_ref().unwrap().selected_text().as_deref(), Some("example"));
+    command(&mut app, "select-line-end");
+    assert_eq!(app.edit.as_ref().unwrap().selected_text().as_deref(), Some("example.com/"));
+
+    // Typing replaces what is selected; so does a paste.
+    press(&mut app, KeyCode::Home);
+    with(&mut app, KeyCode::Right, shift | KeyModifiers::ALT);
+    type_text(&mut app, "tilde");
+    assert_eq!(app.edit.as_ref().unwrap().text, "tilde.com/");
+    command(&mut app, "select-all");
+    assert_eq!(app.edit.as_ref().unwrap().selected_text().as_deref(), Some("tilde.com/"));
+    app.handle_paste("webkit.org");
+    assert_eq!(app.edit.as_ref().unwrap().text, "webkit.org");
+
+    // Delete and Backspace remove a selection whole.
+    with(&mut app, KeyCode::Left, shift);
+    with(&mut app, KeyCode::Left, shift);
+    press(&mut app, KeyCode::Delete);
+    assert_eq!(app.edit.as_ref().unwrap().text, "webkit.o");
+
+    // An address that is offered whole is all selected: Shift+← gives up its last character.
+    press(&mut app, KeyCode::Esc);
+    key(&mut app, 'o');
+    let whole = app.edit.as_ref().unwrap().text.clone();
+    assert_eq!(app.edit.as_ref().unwrap().selected_text(), Some(whole.clone()));
+    with(&mut app, KeyCode::Left, shift);
+    assert_eq!(app.edit.as_ref().unwrap().selected_text(), Some(whole[..whole.len() - 1].to_string()));
+}
+
+#[test]
+fn closing_a_tab_goes_back_to_the_one_used_before() {
+    let (mut app, _engine) = start();
+    open(&mut app, "a.example");
+    open(&mut app, "b.example");
+    open(&mut app, "c.example");
+    assert_eq!(urls(&app), vec![HOME_URL, "https://a.example", "https://b.example", "https://c.example"]);
+    command(&mut app, "toggle-mode");
+
+    // From c to a, then back and forth between the two.
+    app.select(1);
+    rest(&mut app);
+    key(&mut app, '`');
+    assert_eq!(app.current().unwrap().url, "https://c.example");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.current().unwrap().url, "https://a.example");
+    command(&mut app, "recent-tab");
+    assert_eq!(app.current().unwrap().url, "https://c.example");
+
+    // Tabs passed over on the way somewhere were not in use.
+    key(&mut app, 'k');
+    key(&mut app, 'k');
+    key(&mut app, 'k');
+    assert_eq!(app.current().unwrap().url, HOME_URL);
+    app.tick(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    key(&mut app, '`');
+    assert_eq!(app.current().unwrap().url, "https://c.example", "not b, which was only stepped over");
+
+    // Closing c goes to where one came from, and closing that to the one before.
+    key(&mut app, 'x');
+    assert_eq!(app.current().unwrap().url, HOME_URL);
+    key(&mut app, 'x');
+    assert_eq!(app.current().unwrap().url, "https://a.example");
+
+    // With nothing to go back to, it says so.
+    key(&mut app, 'x');
+    assert_eq!(app.current().unwrap().url, "https://b.example");
+    key(&mut app, '`');
+    assert_eq!(app.current().unwrap().url, "https://b.example");
+    assert!(app.message.as_deref().unwrap_or("").contains("no earlier tab"));
 }

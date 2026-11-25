@@ -454,10 +454,8 @@ def reach_checks(d):
     s = wait(d, lambda s: len(s["tabs"]) == count + 1, "a link opened behind")
     check("F opens a link in a tab behind this one", s["active"] == reach_tab)
     typ(d, "j"); wait(d, lambda s: s["active"] != reach_tab, "the tab behind"); typ(d, "x")
-    # Closing a tab shows the one after it, when there is one.
-    if wait(d, lambda s: len(s["tabs"]) == count and s.get("active"), "the tab behind closed")["active"] != reach_tab:
-        typ(d, "k")
-    wait(d, lambda s: s["active"] == reach_tab, "back on the reach tab")
+    s = wait(d, lambda s: len(s["tabs"]) == count and s.get("active"), "the tab behind closed")
+    check("closing a tab goes back to the one used before it", s["active"] == reach_tab)
 
     # The welcome can be asked for, and gives the page back.
     key(d, "?", "cmd+shift", 44)
@@ -467,6 +465,48 @@ def reach_checks(d):
     check("Cmd+Shift+/ shows the welcome, and its pages turn", state(d)["web_hidden"] is True and "Going somewhere" in text)
     typ(d, "\x1b")
     wait(d, lambda s: s["web_hidden"] is False, "the page after the welcome")
+
+    # Text in the address field is selected with Shift and the arrows, which
+    # must come through the terminal with their modifiers.
+    nav(d)
+    typ(d, "t")
+    typ(d, "abcdef.test")
+    wait_screen(d, lambda t: "abcdef.test" in t, "the typed address")
+    for _ in range(4):
+        key(d, "\uf702", "shift", 123)
+    typ(d, "X")
+    text = wait_screen(d, lambda t: "X" in t.split("abcdef.")[-1][:8], "typing over a selection")
+    check("Shift+arrows select in the address field, and typing replaces it", "abcdef.X " in text)
+    key(d, "\uf702", "shift+alt", 123)
+    typ(d, "Y")
+    text = wait_screen(d, lambda t: "Y" in t.split("abcdef.")[-1][:8], "typing over a selected word")
+    check("Shift+Option+arrows select by words", "abcdef.Y " in text)
+    key(d, "a", "cmd", 0)
+    typ(d, "zz.q")
+    text = wait_screen(d, lambda t: "zz.q" in t, "typing over everything")
+    check("Cmd+A selects the whole field", "abcdef" not in text)
+    if BACKGROUND:
+        # The window sees key equivalents only when it is the key window.
+        skip("Cmd+Shift+arrow selects to the end of the field", "needs focus")
+    else:
+        # Whoever is at this Mac may have brought another app forward meanwhile.
+        end = time.time() + 10
+        while not state(d).get("app_active") and time.time() < end:
+            d.call("debug.activate")
+            time.sleep(0.3)
+        key(d, "\uf702", "cmd+shift", 123)
+        typ(d, "w")
+        time.sleep(0.4)
+        check("Cmd+Shift+arrow selects to the end of the field", "zz.q" not in screen(d), "\n".join(l for l in screen(d).splitlines() if "zz" in l))
+    typ(d, "\x1b")
+    wait(d, lambda s: s["active"] == reach_tab, "back on the reach tab after the address field")
+
+    # Ctrl+` goes to the tab used before, and again comes back.
+    key(d, "`", "ctrl", 50)
+    s = wait(d, lambda s: s["active"] != reach_tab, "the tab used before")
+    key(d, "`", "ctrl", 50)
+    wait(d, lambda s: s["active"] == reach_tab, "back from the tab used before")
+    check("Ctrl+` switches between the two tabs used last", True)
 
     # The palette is drawn over a still of the page.
     key(d, "P", "cmd+shift", 35)
@@ -529,11 +569,15 @@ def reach_checks(d):
           sum(len(space["tabs"]) for space in wait_session(lambda j: True, "session")["spaces"]) == listed,
           f"{len(s['tabs'])} of {loaded} loaded")
     asleep = len(s["tabs"])
-    typ(d, "k")
+    # To a neighbour that is asleep: below, or above when this is the last tab.
+    here = s["active"]
+    typ(d, "j"); time.sleep(0.6)
+    if state(d)["active"] == here:
+        typ(d, "k")
     s = wait(d, lambda s: len(s["tabs"]) == asleep + 1 and active(s)["url"] and not active(s)["loading"], "a sleeping tab wakes")
     check("a sleeping tab wakes when it is shown", True)
-    typ(d, "j")
-    wait(d, lambda s: active(s)["title"] in ("blocked", "loaded", "ads"), "back on the last tab")
+    typ(d, "`")
+    wait(d, lambda s: active(s)["title"] in ("blocked", "loaded", "ads"), "back on the tab used before")
     typ(d, "x"); time.sleep(0.5)
 
 
@@ -641,7 +685,7 @@ def main():
 
     # A page that focuses itself must not take the keyboard from the TUI
     nav(d)
-    typ(d, "o"); typ(d, "data:text/html,<title>grabby</title><input id=i><script>setInterval(() => document.getElementById('i').focus(), 100)</script>"); typ(d, "\r")
+    typ(d, "t"); typ(d, "data:text/html,<title>grabby</title><input id=i><script>setInterval(() => document.getElementById('i').focus(), 100)</script>"); typ(d, "\r")
     wait(d, lambda s: active(s)["title"] == "grabby" and s["mode"] == "page", "grabby page")
     nav(d); time.sleep(1)
     check("a page calling focus() cannot leave NAV mode", state(d)["mode"] == "nav")

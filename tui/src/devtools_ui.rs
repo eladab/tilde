@@ -223,7 +223,7 @@ fn draw_search(buf: &mut Buffer, app: &App, look: &Look, row: Rect) -> Option<Po
     if shown.is_empty() {
         put(buf, field.x + 2, field.y, room as u16, "type to filter", Style::default().fg(look.p.dim).bg(look.field));
     } else {
-        buf.set_stringn(field.x + 2, field.y, &shown, room, Style::default().fg(look.p.text).bg(look.field));
+        crate::ui::put_edit(buf, field.x + 2, field.y, room, &chars, start, edit.selection(), Style::default().fg(look.p.text).bg(look.field));
     }
     Some(Position::new(field.x + 2 + used as u16, field.y))
 }

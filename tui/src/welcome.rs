@@ -47,6 +47,7 @@ pub const PAGES: &[Page] = &[
             ("o", "type an address or a search in this tab", "⌘L"),
             ("t", "open a new tab", "⌘T"),
             ("j  k", "the next tab, the previous tab", ""),
+            ("`", "the tab you were on before; again to come back", "⌃`"),
             ("x", "close the tab", "⌘W"),
             ("u", "reopen the tab you just closed", "⇧⌘T"),
             ("H  L", "back, forward", "⌘[ ⌘]"),

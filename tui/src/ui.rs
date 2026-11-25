@@ -206,6 +206,24 @@ pub(crate) fn put(buf: &mut Buffer, x: u16, y: u16, max_width: u16, text: &str, 
     buf.set_stringn(x, y, fit(text, max_width as usize), max_width as usize, style);
 }
 
+/// Draws the text of a field from its character `start`, in at most `room`
+/// columns, with what is selected picked out. Answers the columns used.
+pub fn put_edit(buf: &mut Buffer, x: u16, y: u16, room: usize, chars: &[char], start: usize, selection: Option<(usize, usize)>, style: Style) -> usize {
+    let selected = Style::default().bg(ACCENT).fg(Color::Black);
+    let mut used = 0;
+    for (index, c) in chars.iter().enumerate().skip(start) {
+        let w = c.width().unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        let within = selection.is_some_and(|(from, to)| index >= from && index < to);
+        let mut bytes = [0; 4];
+        buf.set_stringn(x + used as u16, y, c.encode_utf8(&mut bytes), w, if within { selected } else { style });
+        used += w;
+    }
+    used
+}
+
 /// Draws the whole interface and returns where the text cursor belongs, if anywhere.
 pub fn draw(frame: &mut Frame, app: &App) -> Option<Position> {
     let area = frame.area();
@@ -457,22 +475,7 @@ fn draw_toolbar(buf: &mut Buffer, app: &App) -> Option<Position> {
             while width_of(&chars[start..edit.cursor.min(chars.len())]) >= text_w.max(1) {
                 start += 1;
             }
-            let mut visible = String::new();
-            let mut used = 0;
-            for c in &chars[start..] {
-                let w = c.width().unwrap_or(0);
-                if used + w > text_w {
-                    break;
-                }
-                visible.push(*c);
-                used += w;
-            }
-            let style = if edit.replace_on_type {
-                Style::default().bg(ACCENT).fg(Color::Black)
-            } else {
-                Style::default().bg(p.field).fg(p.text)
-            };
-            buf.set_stringn(inner.x + 1, inner.y, &visible, text_w, style);
+            let used = put_edit(buf, inner.x + 1, inner.y, text_w, &chars, start, edit.selection(), Style::default().bg(p.field).fg(p.text));
             // What the history would add is shown ahead of the cursor, fainter.
             if let Some(completion) = edit.completion.as_ref().filter(|_| edit.cursor >= chars.len() && used < text_w) {
                 put(buf, inner.x + 1 + used as u16, inner.y, (text_w - used) as u16, &completion.rest, Style::default().bg(p.field).fg(p.dim));
@@ -1063,13 +1066,7 @@ fn draw_find(buf: &mut Buffer, app: &App, find: &crate::find::Find, p: &Palette)
     if chars.is_empty() {
         put(buf, field.x + 1, field.y, text_w as u16, "Find in page", Style::default().fg(p.faint).bg(well));
     } else {
-        let visible: String = chars[start..].iter().collect();
-        let style = if edit.replace_on_type && typing {
-            Style::default().bg(ACCENT).fg(Color::Black)
-        } else {
-            Style::default().bg(well).fg(p.text)
-        };
-        buf.set_stringn(field.x + 1, field.y, &visible, text_w, style);
+        put_edit(buf, field.x + 1, field.y, text_w, &chars, start, edit.selection().filter(|_| typing), Style::default().bg(well).fg(p.text));
     }
     x = field.x + field.width;
     if let Some(result) = find.result.filter(|_| !chars.is_empty()) {

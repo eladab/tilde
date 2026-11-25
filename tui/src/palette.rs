@@ -25,6 +25,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("new-tab", "New tab", "⌘T"),
     ("close-tab", "Close tab", "⌘W"),
     ("reopen-tab", "Reopen closed tab", "⇧⌘T"),
+    ("recent-tab", "Switch to the tab used before", "⌃`"),
     ("reload", "Reload page", "⌘R"),
     ("back", "Back", "⌘["),
     ("forward", "Forward", "⌘]"),
@@ -401,8 +402,7 @@ pub fn draw(buf: &mut Buffer, app: &App, p: &Colors) -> Option<Position> {
     if chars.is_empty() {
         put(buf, text_x, field.y, text_w as u16, "Find a tab, a page or a command   > commands only", Style::default().fg(p.faint).bg(p.field));
     } else {
-        let visible: String = chars[start..].iter().collect();
-        buf.set_stringn(text_x, field.y, &visible, text_w, Style::default().fg(p.text).bg(p.field));
+        crate::ui::put_edit(buf, text_x, field.y, text_w, &chars, start, palette.edit.selection(), Style::default().fg(p.text).bg(p.field));
     }
     let cursor = Position::new(text_x + width_of(&chars[start..at]) as u16, field.y);
 

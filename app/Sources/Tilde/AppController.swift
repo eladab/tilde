@@ -31,10 +31,25 @@ final class BrowserWindow: NSWindow {
         return true
     }
 
+    /// Called for Cmd+← (`false`) and Cmd+→ (`true`), and whether Shift is
+    /// held, while the terminal has the keyboard.
+    var onLineEnd: ((Bool, Bool) -> Void)?
+
+    /// The terminal sends nothing for Cmd with an arrow, so the TUI is told:
+    /// in a text field they go to its ends, and with Shift select up to them.
+    private func handleLineEnds(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 123 || event.keyCode == 124 else { return false }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard flags == .command || flags == [.command, .shift], !Self.isInsideWebView(firstResponder as? NSView) else { return false }
+        onLineEnd?(event.keyCode == 124, flags.contains(.shift))
+        return true
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Before the web view sees it: a focused web view claims every key equivalent.
         if handleTabCycling(event) { return true }
         if handleClearLine(event) { return true }
+        if handleLineEnds(event) { return true }
         if NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
@@ -240,6 +255,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
         }
         window.onClearLine = { [weak self] in
             self?.emit("command", ["name": "clear-line"])
+        }
+        window.onLineEnd = { [weak self] end, select in
+            self?.emit("command", ["name": (select ? "select-" : "") + (end ? "line-end" : "line-start")])
         }
         window.delegate = self
         window.isReleasedWhenClosed = false
@@ -760,6 +778,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, Ta
             emit("command", ["name": "copy"])
         } else {
             NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
+        }
+    }
+
+    /// Cut and Select All, likewise: in the terminal they are for the field
+    /// being typed in, not for the terminal's own screen.
+    @objc func cutRequested(_ sender: Any?) {
+        if window.firstResponder === host.view {
+            emit("command", ["name": "cut"])
+        } else {
+            NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: sender)
+        }
+    }
+
+    @objc func selectAllRequested(_ sender: Any?) {
+        if window.firstResponder === host.view {
+            emit("command", ["name": "select-all"])
+        } else {
+            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: sender)
         }
     }
 
